@@ -1,0 +1,420 @@
+// Copyright 2026 Aerospike, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package aerospike implements an Aerospike output and lookup processor.
+package aerospike
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"net"
+	"strconv"
+	"strings"
+	"sync"
+
+	as "github.com/aerospike/aerospike-client-go/v8"
+
+	"github.com/redpanda-data/benthos/v4/public/service"
+)
+
+const (
+	FieldHosts                = "hosts"
+	FieldClusterName          = "cluster_name"
+	FieldUseServicesAlternate = "use_services_alternate"
+	FieldConnectTimeout       = "connect_timeout"
+	FieldMaxConnsPerNode      = "max_connections_per_node"
+	FieldWarmUp               = "warm_up"
+	FieldCredentials          = "credentials"
+	FieldCredentialsUsername  = "username"
+	FieldCredentialsPassword  = "password"
+	FieldTLS                  = "tls"
+	FieldAuthMode             = "auth_mode"
+
+	// defaultServicePort is the Aerospike client service port.
+	defaultServicePort = 3000
+)
+
+// ClientFields returns the connection configuration fields common to every
+// Aerospike component.
+func ClientFields() []*service.ConfigField {
+	return []*service.ConfigField{
+		service.NewStringListField(FieldHosts).
+			Description("Seed nodes as `host`, `host:port`, `host:tlsname:port`, or `[ipv6]:tlsname:port`. Port defaults to 3000. The tlsname is the certificate name used for TLS verification and is required against a conventionally secured cluster. The client discovers and connects directly to every node, so all nodes must be reachable from this process — a load balancer in front of the seeds is not sufficient.").
+			Example([]string{"localhost:3000"}).
+			Example([]string{"as1.internal:clusterA:3000"}).
+			Example([]string{"as1.internal:3000", "as2.internal:3000"}),
+
+		service.NewStringField(FieldClusterName).
+			Description("Expected cluster name. When set, the client refuses to talk to nodes reporting a different name.").
+			Default("").
+			Advanced(),
+
+		service.NewBoolField(FieldUseServicesAlternate).
+			Description("Use the nodes' `alternate-access-address` instead of `access-address`. Required when this process reaches Aerospike over a different network than the one the nodes advertise, which is the usual case for Kubernetes and NAT deployments.").
+			Default(false).
+			Advanced(),
+
+		service.NewDurationField(FieldConnectTimeout).
+			Description("Timeout for establishing the initial cluster connection. Capped by the remaining pipeline context deadline when one is set, so a shutdown mid-connect does not wait the full duration.").
+			Default("30s").
+			Advanced(),
+
+		service.NewIntField(FieldMaxConnsPerNode).
+			Description("Size of the client connection pool per cluster node.").
+			Default(100).
+			Advanced(),
+
+		service.NewBoolField(FieldWarmUp).
+			Description("Fill the connection pool on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands.").
+			Default(true).
+			Advanced(),
+
+		service.NewObjectField(FieldCredentials,
+			service.NewStringField(FieldCredentialsUsername).
+				Description("Username for Aerospike access control.").
+				Default(""),
+			service.NewStringField(FieldCredentialsPassword).
+				Description("Password for Aerospike access control.").
+				Default("").
+				Secret(),
+		).Description("Credentials for clusters with access control enabled. Aerospike Community Edition has no authentication; leave empty there.").
+			Optional().
+			Advanced(),
+
+		service.NewStringAnnotatedEnumField(FieldAuthMode, map[string]string{
+			"internal": "Hashed password stored on the server. Default.",
+			"external": "External authentication such as LDAP. Requires TLS.",
+			"pki":      "Certificate authentication. Requires TLS and a client certificate; do not set a password.",
+		}).
+			Description("Authentication mode. `internal` is password auth against the server. `external` is LDAP. `pki` is client-certificate auth and does not use a password.").
+			Default("internal").
+			Advanced(),
+
+		service.NewTLSToggledField(FieldTLS),
+	}
+}
+
+// ClientConfig is the parsed connection configuration.
+type ClientConfig struct {
+	Hosts  []*as.Host
+	Policy *as.ClientPolicy
+	WarmUp bool
+}
+
+// ParseClientConfig reads the fields produced by ClientFields.
+func ParseClientConfig(conf *service.ParsedConfig) (*ClientConfig, error) {
+	hostStrs, err := conf.FieldStringList(FieldHosts)
+	if err != nil {
+		return nil, err
+	}
+	if len(hostStrs) == 0 {
+		return nil, fmt.Errorf("field '%v' must contain at least one seed node", FieldHosts)
+	}
+
+	c := &ClientConfig{Policy: as.NewClientPolicy()}
+	for _, h := range hostStrs {
+		host, err := ParseHost(h)
+		if err != nil {
+			return nil, err
+		}
+		c.Hosts = append(c.Hosts, host)
+	}
+
+	if c.Policy.ClusterName, err = conf.FieldString(FieldClusterName); err != nil {
+		return nil, err
+	}
+	if c.Policy.UseServicesAlternate, err = conf.FieldBool(FieldUseServicesAlternate); err != nil {
+		return nil, err
+	}
+	if c.Policy.Timeout, err = conf.FieldDuration(FieldConnectTimeout); err != nil {
+		return nil, err
+	}
+	if c.Policy.ConnectionQueueSize, err = conf.FieldInt(FieldMaxConnsPerNode); err != nil {
+		return nil, err
+	}
+	if c.WarmUp, err = conf.FieldBool(FieldWarmUp); err != nil {
+		return nil, err
+	}
+
+	if conf.Contains(FieldCredentials) {
+		cc := conf.Namespace(FieldCredentials)
+		if c.Policy.User, err = cc.FieldString(FieldCredentialsUsername); err != nil {
+			return nil, err
+		}
+		if c.Policy.Password, err = cc.FieldString(FieldCredentialsPassword); err != nil {
+			return nil, err
+		}
+	}
+
+	mode, err := conf.FieldString(FieldAuthMode)
+	if err != nil {
+		return nil, err
+	}
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "internal":
+		c.Policy.AuthMode = as.AuthModeInternal
+	case "external":
+		c.Policy.AuthMode = as.AuthModeExternal
+	case "pki":
+		c.Policy.AuthMode = as.AuthModePKI
+	default:
+		return nil, fmt.Errorf("field '%v': unknown auth mode %q", FieldAuthMode, mode)
+	}
+
+	var tlsConf *tls.Config
+	var tlsEnabled bool
+	if tlsConf, tlsEnabled, err = conf.FieldTLSToggled(FieldTLS); err != nil {
+		return nil, err
+	}
+	if tlsEnabled {
+		c.Policy.TlsConfig = tlsConf
+	}
+
+	return c, nil
+}
+
+// ParseHost accepts Aerospike seed addresses:
+//
+//	host
+//	host:port
+//	host:tlsname
+//	host:tlsname:port
+//
+// IPv6 literals must be bracketed when a port or tlsname is present (`[::1]:3000`,
+// `[2001:db8::1]:clusterA:3000`). A bare IPv6 address (`::1`) is a host with the
+// default port. The tlsname is the certificate name used for TLS verification.
+func ParseHost(s string) (*as.Host, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, fmt.Errorf("empty host entry in '%v'", FieldHosts)
+	}
+
+	name, rest, err := splitHostName(s)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsName, port, err := parseHostSuffix(s, rest)
+	if err != nil {
+		return nil, err
+	}
+
+	h := as.NewHost(name, port)
+	h.TLSName = tlsName
+	return h, nil
+}
+
+func splitHostName(s string) (name, rest string, err error) {
+	if strings.HasPrefix(s, "[") {
+		end := strings.IndexByte(s, ']')
+		if end < 0 {
+			return "", "", fmt.Errorf("invalid host %q: unclosed IPv6 bracket", s)
+		}
+		name = s[1:end]
+		if net.ParseIP(name) == nil {
+			return "", "", fmt.Errorf("invalid host %q: %q is not an IP address", s, name)
+		}
+		return name, s[end+1:], nil
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		return s, "", nil
+	}
+	host, after, found := strings.Cut(s, ":")
+	if !found {
+		return s, "", nil
+	}
+	if host == "" {
+		return "", "", fmt.Errorf("invalid host %q: missing hostname", s)
+	}
+	return host, ":" + after, nil
+}
+
+// parseHostSuffix reads the optional [:tlsname][:port] tail. A component that
+// parses as an integer is a port; otherwise it is the TLS certificate name.
+func parseHostSuffix(orig, rest string) (tlsName string, port int, err error) {
+	port = defaultServicePort
+	if rest == "" {
+		return "", port, nil
+	}
+	if !strings.HasPrefix(rest, ":") {
+		return "", 0, fmt.Errorf("invalid host %q: unexpected trailing %q", orig, rest)
+	}
+	rest = rest[1:]
+	if rest == "" {
+		return "", 0, fmt.Errorf("invalid host %q: trailing colon", orig)
+	}
+
+	first, second, hasSecond := strings.Cut(rest, ":")
+	if first == "" {
+		return "", 0, fmt.Errorf("invalid host %q", orig)
+	}
+
+	if !hasSecond {
+		if p, ok, err := parsePort(orig, first); err != nil {
+			return "", 0, err
+		} else if ok {
+			return "", p, nil
+		}
+		return first, port, nil
+	}
+
+	if _, isPort, err := parsePort(orig, first); err != nil {
+		return "", 0, err
+	} else if isPort {
+		return "", 0, fmt.Errorf("invalid host %q: expected host:tlsname:port, not host:port:tlsname", orig)
+	}
+	if strings.Contains(second, ":") {
+		return "", 0, fmt.Errorf("invalid host %q: expected host:tlsname:port", orig)
+	}
+	p, ok, err := parsePort(orig, second)
+	if err != nil {
+		return "", 0, err
+	}
+	if !ok {
+		return "", 0, fmt.Errorf("invalid port in host %q: %q", orig, second)
+	}
+	return first, p, nil
+}
+
+func parsePort(orig, s string) (int, bool, error) {
+	if s == "" || s[0] < '0' || s[0] > '9' {
+		return 0, false, nil
+	}
+	p, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, false, fmt.Errorf("invalid port in host %q: %w", orig, err)
+	}
+	if p < 1 || p > 65535 {
+		return 0, false, fmt.Errorf("invalid port in host %q: %d is out of range", orig, p)
+	}
+	return p, true, nil
+}
+
+// Connection owns a single Aerospike client for the lifetime of a component.
+//
+// The client is thread safe and holds the cluster state and connection pools,
+// so one per component is correct; creating one per request would exhaust
+// ports and add a cluster tend to every operation.
+type Connection struct {
+	conf *ClientConfig
+	log  *service.Logger
+
+	mu     sync.RWMutex
+	client *as.Client
+}
+
+// NewConnection returns an unconnected handle. Call Connect before issuing commands.
+func NewConnection(conf *ClientConfig, log *service.Logger) *Connection {
+	return &Connection{conf: conf, log: log}
+}
+
+func (c *Connection) Connect(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.client != nil && c.client.IsConnected() {
+		return nil
+	}
+	if c.client != nil {
+		c.client.Close()
+		c.client = nil
+	}
+
+	policy := c.conf.Policy
+	if policy == nil {
+		policy = as.NewClientPolicy()
+	}
+	p := *policy
+	timeout, err := LimitDuration(ctx, p.Timeout)
+	if err != nil {
+		return err
+	}
+	p.Timeout = timeout
+
+	type outcome struct {
+		client *as.Client
+		err    error
+	}
+	ch := make(chan outcome, 1)
+	go func() {
+		client, err := as.NewClientWithPolicyAndHost(&p, c.conf.Hosts...)
+		if err != nil {
+			ch <- outcome{err: err}
+			return
+		}
+		if c.conf.WarmUp {
+			if _, werr := client.WarmUp(-1); werr != nil && c.log != nil {
+				c.log.Warnf("Connection pool warm up did not complete: %v", werr)
+			}
+		}
+		ch <- outcome{client: client}
+	}()
+
+	select {
+	case <-ctx.Done():
+		go func() {
+			o := <-ch
+			if o.client != nil {
+				o.client.Close()
+			}
+		}()
+		return fmt.Errorf("connecting to aerospike: %w", ctx.Err())
+	case o := <-ch:
+		if o.err != nil {
+			return fmt.Errorf("connecting to aerospike cluster: %w", o.err)
+		}
+		c.client = o.client
+		if c.log != nil {
+			c.log.Infof("Connected to Aerospike cluster with %v node(s)", len(o.client.GetNodes()))
+		}
+		return nil
+	}
+}
+
+func (c *Connection) Close(ctx context.Context) error {
+	c.mu.Lock()
+	client := c.client
+	c.client = nil
+	c.mu.Unlock()
+	if client == nil {
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.Close()
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Client returns the live client, or nil when the component is not connected.
+func (c *Connection) Client() *as.Client {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.client == nil || !c.client.IsConnected() {
+		return nil
+	}
+	return c.client
+}

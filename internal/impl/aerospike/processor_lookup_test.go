@@ -1,0 +1,215 @@
+// Copyright 2026 Aerospike, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package aerospike
+
+import (
+	"testing"
+
+	as "github.com/aerospike/aerospike-client-go/v8"
+	"github.com/aerospike/aerospike-client-go/v8/types"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/redpanda-data/benthos/v4/public/service"
+)
+
+func newTestProcessor(t *testing.T, yaml string) *lookupProcessor {
+	t.Helper()
+	conf, err := lookupSpec().ParseYAML(yaml, nil)
+	require.NoError(t, err)
+	parsed, err := parseLookupConfig(conf)
+	require.NoError(t, err)
+	return &lookupProcessor{conf: parsed, conn: NewConnection(parsed.client, nil)}
+}
+
+const lookupBaseConfig = `
+hosts: [ "localhost:3000" ]
+namespace: profiles
+set: user
+key: '${! json("user_id") }'
+`
+
+// TestPlanReadsDeduplicates is the efficiency claim: a stream of events about a
+// few entities must not issue one read per event.
+func TestPlanReadsDeduplicates(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig)
+
+	batch := service.MessageBatch{
+		service.NewMessage([]byte(`{"user_id":"u1","evt":1}`)),
+		service.NewMessage([]byte(`{"user_id":"u2","evt":2}`)),
+		service.NewMessage([]byte(`{"user_id":"u1","evt":3}`)),
+		service.NewMessage([]byte(`{"user_id":"u1","evt":4}`)),
+	}
+
+	reads, failed := p.planReads(batch)
+	require.Empty(t, failed)
+
+	// Four messages, two entities, two reads.
+	require.Len(t, reads, 2)
+	assert.Equal(t, []int{0, 2, 3}, reads[0].indexes)
+	assert.Equal(t, []int{1}, reads[1].indexes)
+}
+
+func TestPlanReadsIsolatesKeyFailures(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig)
+
+	batch := service.MessageBatch{
+		service.NewMessage([]byte(`{"user_id":"u1"}`)),
+		service.NewMessage([]byte(`{"no_key":true}`)),
+		service.NewMessage([]byte(`{"user_id":"u3"}`)),
+	}
+
+	reads, failed := p.planReads(batch)
+
+	assert.Len(t, reads, 2)
+	require.Len(t, failed, 1)
+	assert.True(t, failed[1])
+
+	// The bad message carries its own error and keeps its content.
+	require.Error(t, batch[1].GetError())
+	assert.Contains(t, batch[1].GetError().Error(), "not a usable record key")
+}
+
+func TestReadAllBinsWhenNoneNamed(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig)
+	assert.True(t, p.conf.readAllBins)
+
+	batch := service.MessageBatch{service.NewMessage([]byte(`{"user_id":"u1"}`))}
+	reads, _ := p.planReads(batch)
+	require.Len(t, reads, 1)
+	// Without this the client reads only the record header, returning no bins.
+	assert.True(t, reads[0].read.ReadAllBins)
+}
+
+func TestNamedBinsAreRequested(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig+"bins: [ tier, ltv ]\n")
+	assert.False(t, p.conf.readAllBins)
+
+	batch := service.MessageBatch{service.NewMessage([]byte(`{"user_id":"u1"}`))}
+	reads, _ := p.planReads(batch)
+	require.Len(t, reads, 1)
+	assert.False(t, reads[0].read.ReadAllBins)
+	assert.Equal(t, []string{"tier", "ltv", DefaultTombstoneBin}, reads[0].read.BinNames)
+}
+
+func TestConfigRejectsLongBinName(t *testing.T) {
+	conf, err := lookupSpec().ParseYAML(lookupBaseConfig+"bins: [ this_bin_name_is_too_long ]\n", nil)
+	require.NoError(t, err)
+
+	_, err = parseLookupConfig(conf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds the Aerospike limit of 15")
+}
+
+func TestAssembleRemovesDropped(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig+"not_found: drop\n")
+
+	batch := service.MessageBatch{
+		service.NewMessage([]byte(`a`)),
+		service.NewMessage([]byte(`b`)),
+		service.NewMessage([]byte(`c`)),
+	}
+
+	out := p.assemble(batch, map[int]bool{1: true})
+	require.Len(t, out, 1)
+	require.Len(t, out[0], 2)
+
+	first, _ := out[0][0].AsBytes()
+	second, _ := out[0][1].AsBytes()
+	assert.Equal(t, "a", string(first))
+	assert.Equal(t, "c", string(second))
+}
+
+func TestNotFoundModes(t *testing.T) {
+	t.Run("emit_null", func(t *testing.T) {
+		p := newTestProcessor(t, lookupBaseConfig)
+		m := service.NewMessage([]byte(`{"user_id":"u1"}`))
+
+		assert.Equal(t, resultKeep, p.applyNotFound(m))
+		v, err := m.AsStructured()
+		require.NoError(t, err)
+		assert.Nil(t, v)
+		assert.NoError(t, m.GetError())
+	})
+
+	t.Run("error", func(t *testing.T) {
+		p := newTestProcessor(t, lookupBaseConfig+"not_found: error\n")
+		m := service.NewMessage([]byte(`{"user_id":"u1"}`))
+
+		assert.Equal(t, resultKeep, p.applyNotFound(m))
+		require.Error(t, m.GetError())
+	})
+
+	t.Run("drop", func(t *testing.T) {
+		p := newTestProcessor(t, lookupBaseConfig+"not_found: drop\n")
+		m := service.NewMessage([]byte(`{"user_id":"u1"}`))
+
+		assert.Equal(t, resultDrop, p.applyNotFound(m))
+	})
+}
+
+func TestTombstoneRecordIsNotFound(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig)
+	m := service.NewMessage([]byte(`{"user_id":"u1"}`))
+
+	rec := &as.BatchRecord{
+		ResultCode: types.OK,
+		Record:     &as.Record{Bins: as.BinMap{DefaultTombstoneBin: true, "tier": "gold"}},
+	}
+	assert.Equal(t, resultKeep, p.applyResult(m, rec))
+	v, err := m.AsStructured()
+	require.NoError(t, err)
+	assert.Nil(t, v)
+	assert.NoError(t, m.GetError())
+}
+
+func TestApplyResultSuccessEmitsMetadata(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig+"emit_metadata: true\n")
+	m := service.NewMessage([]byte(`{"user_id":"u1"}`))
+
+	rec := &as.BatchRecord{
+		ResultCode: types.OK,
+		Record: &as.Record{
+			Bins:       as.BinMap{"tier": "gold"},
+			Generation: 4,
+			Expiration: 99,
+		},
+	}
+	assert.Equal(t, resultKeep, p.applyResult(m, rec))
+	v, err := m.AsStructured()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"tier": "gold"}, v)
+
+	gen, ok := m.MetaGet("aerospike_generation")
+	require.True(t, ok)
+	assert.Equal(t, "4", gen)
+}
+
+func TestParseReadPolicy(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig)
+	assert.Equal(t, 2, p.conf.batchPolicy.MaxRetries)
+	assert.Equal(t, as.SEQUENCE, p.conf.batchPolicy.ReplicaPolicy)
+	assert.Equal(t, as.ReadModeAPOne, p.conf.batchPolicy.ReadModeAP)
+	assert.Equal(t, as.ReadModeSCSession, p.conf.batchPolicy.ReadModeSC)
+
+	p = newTestProcessor(t, lookupBaseConfig+`
+replica: master_proles
+read_mode_ap: all
+read_mode_sc: linearize
+`)
+	assert.Equal(t, as.MASTER_PROLES, p.conf.batchPolicy.ReplicaPolicy)
+	assert.Equal(t, as.ReadModeAPAll, p.conf.batchPolicy.ReadModeAP)
+	assert.Equal(t, as.ReadModeSCLinearize, p.conf.batchPolicy.ReadModeSC)
+}
