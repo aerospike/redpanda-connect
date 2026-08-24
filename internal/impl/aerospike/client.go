@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,13 +29,17 @@ import (
 	"github.com/redpanda-data/benthos/v4/public/service"
 )
 
+// Configuration field names shared by every Aerospike component.
 const (
 	FieldHosts                = "hosts"
 	FieldClusterName          = "cluster_name"
 	FieldUseServicesAlternate = "use_services_alternate"
 	FieldConnectTimeout       = "connect_timeout"
 	FieldMaxConnsPerNode      = "max_connections_per_node"
+	FieldMinConnsPerNode      = "min_connections_per_node"
 	FieldWarmUp               = "warm_up"
+	FieldMaxErrorRate         = "max_error_rate"
+	FieldErrorRateWindow      = "error_rate_window"
 	FieldCredentials          = "credentials"
 	FieldCredentialsUsername  = "username"
 	FieldCredentialsPassword  = "password"
@@ -72,13 +76,32 @@ func ClientFields() []*service.ConfigField {
 			Advanced(),
 
 		service.NewIntField(FieldMaxConnsPerNode).
-			Description("Size of the client connection pool per cluster node.").
+			Description("Maximum size of the client connection pool per cluster node. The client opens connections to every node, so budget `max_connections_per_node` multiplied by the number of processes against the server's `proto-fd-max`.").
 			Default(100).
+			LintRule(PositiveLint).
+			Advanced(),
+
+		service.NewIntField(FieldMinConnsPerNode).
+			Description("Number of connections per node to keep open even while idle, so a burst after a quiet period does not pay reconnect cost. This is also how many connections `warm_up` opens. Keep it only as high as the steady-state concurrency needs: every connection is a file descriptor on the node, and with TLS a large pool makes startup and reconnect expensive in server CPU.").
+			Default(0).
+			LintRule(NonNegativeLint).
 			Advanced(),
 
 		service.NewBoolField(FieldWarmUp).
-			Description("Fill the connection pool on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands.").
+			Description("Open `min_connections_per_node` connections on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands. Has no effect when `min_connections_per_node` is `0`.").
 			Default(true).
+			Advanced(),
+
+		service.NewIntField(FieldMaxErrorRate).
+			Description("Errors permitted from a single node per `error_rate_window` before the client stops sending it commands and fails fast instead. This is a circuit breaker: it stops a pipeline from hammering a node that is already failing. `0` disables it.").
+			Default(100).
+			LintRule(NonNegativeLint).
+			Advanced(),
+
+		service.NewIntField(FieldErrorRateWindow).
+			Description("Number of cluster tend iterations that make up the window for `max_error_rate`.").
+			Default(1).
+			LintRule(NonNegativeLint).
 			Advanced(),
 
 		service.NewObjectField(FieldCredentials,
@@ -144,8 +167,34 @@ func ParseClientConfig(conf *service.ParsedConfig) (*ClientConfig, error) {
 	if c.Policy.ConnectionQueueSize, err = conf.FieldInt(FieldMaxConnsPerNode); err != nil {
 		return nil, err
 	}
+	if c.Policy.ConnectionQueueSize < 1 {
+		return nil, fmt.Errorf("field '%v' must be at least 1", FieldMaxConnsPerNode)
+	}
+	if c.Policy.MinConnectionsPerNode, err = conf.FieldInt(FieldMinConnsPerNode); err != nil {
+		return nil, err
+	}
+	if c.Policy.MinConnectionsPerNode < 0 {
+		return nil, fmt.Errorf("field '%v' must not be negative", FieldMinConnsPerNode)
+	}
+	if c.Policy.MinConnectionsPerNode > c.Policy.ConnectionQueueSize {
+		return nil, fmt.Errorf("field '%v' (%d) must not exceed '%v' (%d)",
+			FieldMinConnsPerNode, c.Policy.MinConnectionsPerNode,
+			FieldMaxConnsPerNode, c.Policy.ConnectionQueueSize)
+	}
 	if c.WarmUp, err = conf.FieldBool(FieldWarmUp); err != nil {
 		return nil, err
+	}
+	if c.Policy.MaxErrorRate, err = conf.FieldInt(FieldMaxErrorRate); err != nil {
+		return nil, err
+	}
+	if c.Policy.MaxErrorRate < 0 {
+		return nil, fmt.Errorf("field '%v' must not be negative", FieldMaxErrorRate)
+	}
+	if c.Policy.ErrorRateWindow, err = conf.FieldInt(FieldErrorRateWindow); err != nil {
+		return nil, err
+	}
+	if c.Policy.ErrorRateWindow < 0 {
+		return nil, fmt.Errorf("field '%v' must not be negative", FieldErrorRateWindow)
 	}
 
 	if conf.Contains(FieldCredentials) {
@@ -288,9 +337,18 @@ func parseHostSuffix(orig, rest string) (tlsName string, port int, err error) {
 	return first, p, nil
 }
 
+// parsePort reports whether s is a port number, and its value. Only a wholly
+// numeric component is a port: a TLS certificate name may legitimately begin
+// with a digit, so treating any digit-led component as a port would make names
+// like `1cluster` unconfigurable.
 func parsePort(orig, s string) (int, bool, error) {
-	if s == "" || s[0] < '0' || s[0] > '9' {
+	if s == "" {
 		return 0, false, nil
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false, nil
+		}
 	}
 	p, err := strconv.Atoi(s)
 	if err != nil {
@@ -358,8 +416,12 @@ func (c *Connection) Connect(ctx context.Context) error {
 			ch <- outcome{err: err}
 			return
 		}
-		if c.conf.WarmUp {
-			if _, werr := client.WarmUp(-1); werr != nil && c.log != nil {
+		// WarmUp(-1) fills the pool to its maximum, which for the default
+		// max_connections_per_node opens 100 connections to every node at
+		// once. Warm up to the configured minimum instead, so the size of the
+		// startup connection burst is something the user chose.
+		if c.conf.WarmUp && p.MinConnectionsPerNode > 0 {
+			if _, werr := client.WarmUp(p.MinConnectionsPerNode); werr != nil && c.log != nil {
 				c.log.Warnf("Connection pool warm up did not complete: %v", werr)
 			}
 		}

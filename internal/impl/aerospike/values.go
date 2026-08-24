@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,6 +30,10 @@ const MaxBinNameLen = 15
 // survives; lookups treat a record carrying this bin as missing.
 const DefaultTombstoneBin = "_deleted"
 
+// DefaultFenceBin holds the monotonic fence value written alongside a record.
+// It is bookkeeping rather than data, so lookups strip it.
+const DefaultFenceBin = "_fence"
+
 // IsTombstone reports whether bins represent a fenced delete rather than a
 // live record. A missing or nil/false value is not a tombstone.
 func IsTombstone(bins map[string]any, bin string) bool {
@@ -46,6 +50,9 @@ func IsTombstone(bins map[string]any, bin string) bool {
 	return true
 }
 
+// ValidateBinName checks a bin name against the server's length limit, so the
+// error can name the field that produced it rather than surfacing as a
+// BIN_NAME_TOO_LONG result code.
 func ValidateBinName(name string) error {
 	if name == "" {
 		return errors.New("bin name must not be empty")

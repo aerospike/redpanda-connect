@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -35,10 +35,15 @@ func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (ser
 	}
 	// An unbatched database sink round-trips per message. If the user has not
 	// expressed a preference, batch by default rather than shipping a pipeline
-	// that is an order of magnitude slower than it should be.
+	// that is an order of magnitude slower than it should be. The framework
+	// renders an unset policy as `count: 0` in the config reference, so say out
+	// loud what actually got applied.
 	if batchPolicy.IsNoop() {
 		batchPolicy.Count = defaultBatchCount
 		batchPolicy.Period = defaultBatchPeriod
+		mgr.Logger().Infof(
+			"No batching policy set, defaulting to %d messages or %s; set batching.count to 1 to write one message per command",
+			defaultBatchCount, defaultBatchPeriod)
 	}
 
 	maxInFlight, err := conf.FieldMaxInFlight()
@@ -79,7 +84,10 @@ func (w *aerospikeWriter) Close(ctx context.Context) error {
 }
 
 func (w *aerospikeWriter) ConnectionTest(ctx context.Context) service.ConnectionTestResults {
-	tmp := NewConnection(w.conf.client, w.log)
+	// A connection test should not warm a pool it is about to throw away.
+	probe := *w.conf.client
+	probe.WarmUp = false
+	tmp := NewConnection(&probe, w.log)
 	if err := tmp.Connect(ctx); err != nil {
 		return service.ConnectionTestFailed(err).AsList()
 	}
@@ -171,31 +179,19 @@ func (w *aerospikeWriter) planBatch(batch service.MessageBatch) ([]*pendingOp, m
 	ops := make([]*pendingOp, 0, len(batch))
 	mapper := newBatchMapper(w.conf, batch)
 
-	var byKey map[string]*pendingOp
-	if w.conf.coalesce {
-		byKey = make(map[string]*pendingOp, len(batch))
-	}
-
 	for i := range batch {
 		op, err := mapper.mapMessage(i)
 		if err != nil {
 			failures[i] = err
 			continue
 		}
-
-		if byKey != nil {
-			id := KeyID(op.key)
-			if prev, exists := byKey[id]; exists {
-				prev.fold(op)
-				continue
-			}
-			byKey[id] = op
-		}
-
 		ops = append(ops, op)
 	}
 
-	return ops, failures
+	if !w.conf.coalesce {
+		return ops, failures
+	}
+	return coalesceOps(ops), failures
 }
 
 func (w *aerospikeWriter) buildRecord(op *pendingOp) as.BatchRecordIfc {

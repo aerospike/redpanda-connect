@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -71,7 +71,8 @@ func startAerospike() (string, error) {
 	}
 	cfgPath := filepath.Join(filepath.Dir(thisFile), "testdata", "aerospike.conf")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute) //nolint:usetesting // container outlives any one test
+	// Not t.Context(): the container is shared and outlives any one test.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	ctr, err := testcontainers.Run(ctx, aerospikeImage,
@@ -406,6 +407,21 @@ func TestIntegrationLookupEnriches(t *testing.T) {
 	assert.Equal(t, map[string]any{"user_id": "u1", "evt": "click"}, structured(t, batch[0]))
 }
 
+// Fencing is invisible to the read side: a record written with a fence must
+// enrich a message with its data and nothing else.
+func TestIntegrationLookupHidesFencingBins(t *testing.T) {
+	p, client := lookupSetup(t, "fence_bin: _off\n")
+
+	seed(t, client, "fu1", as.BinMap{"tier": "gold", "_off": 42})
+
+	out, err := p.ProcessBatch(t.Context(),
+		service.MessageBatch{service.NewMessage([]byte(`{"user_id":"fu1"}`))})
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+
+	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][0]))
+}
+
 func TestIntegrationSelectedBinsOnly(t *testing.T) {
 	p, client := lookupSetup(t, "bins: [ tier ]\n")
 
@@ -515,9 +531,13 @@ func TestIntegrationEmitsMetadata(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "1", gen)
 
+	// The metadata is documented as feeding the output's generation and ttl
+	// fields, so both have to come back in a form those fields accept.
 	ttl, ok := out[0][0].MetaGet(metaTTL)
 	require.True(t, ok)
-	assert.NotEmpty(t, ttl)
+	parsed, ttlErr := parseTTL(ttl)
+	require.NoError(t, ttlErr)
+	assert.InDelta(t, 3600, parsed, 60)
 }
 
 func TestIntegrationKeyFailureIsolated(t *testing.T) {

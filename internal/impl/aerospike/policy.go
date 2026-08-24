@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import (
 	"github.com/redpanda-data/benthos/v4/public/service"
 )
 
+// Configuration field names for Aerospike read and write policies.
 const (
 	FieldCommitLevel = "commit_level"
 	FieldReplica     = "replica"

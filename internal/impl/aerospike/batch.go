@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"github.com/redpanda-data/benthos/v4/public/service"
 )
 
+// Configuration field names for Aerospike batch commands.
 const (
 	FieldConcurrentNodes = "concurrent_nodes"
 	FieldSocketTimeout   = "socket_timeout"
@@ -31,6 +32,9 @@ const (
 
 // NonNegativeLint rejects negative integers in config fields that must be >= 0.
 const NonNegativeLint = `root = if this < 0 { [ "must not be negative" ] }`
+
+// PositiveLint rejects non-positive integers in config fields that must be > 0.
+const PositiveLint = `root = if this < 1 { [ "must be at least 1" ] }`
 
 // BatchPolicyFields returns the Aerospike batch-command fields shared by the
 // output and the lookup processor. Reads default to two retries.
@@ -49,14 +53,14 @@ func BatchPolicyFieldsWithRetries(maxRetries int) []*service.ConfigField {
 
 	return []*service.ConfigField{
 		service.NewIntField(FieldConcurrentNodes).
-			Description("How many cluster nodes to issue batch sub-requests to concurrently. `0` means all of them in parallel.").
+			Description("How many cluster nodes to issue batch sub-requests to concurrently. `0` means all of them in parallel. Note this defaults to fanning out where the Aerospike client itself defaults to `1` (one node at a time); combined with `max_in_flight` it multiplies the load a single pipeline can place on a cluster, so lower it if the cluster is the bottleneck.").
 			Default(0).
 			LintRule(NonNegativeLint).
 			Advanced(),
 
 		service.NewDurationField(FieldSocketTimeout).
-			Description("Per-attempt socket timeout for a batch command. Capped by the remaining pipeline context deadline when one is set.").
-			Default("1s").
+			Description("Per-attempt socket timeout for a batch command. Capped by the remaining pipeline context deadline when one is set. A whole batch has to complete within this window, so raise it if batches are large or the cluster is loaded — with `max_retries` at `0` a socket timeout fails the batch rather than being retried.").
+			Default("5s").
 			Advanced(),
 
 		service.NewDurationField(FieldTotalTimeout).

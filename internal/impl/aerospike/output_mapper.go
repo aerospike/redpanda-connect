@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -165,6 +165,10 @@ func (p *pendingOp) take(next *pendingOp) {
 // would FILTERED_OUT it. A higher-fence payload is merged with the rules above
 // and carries that fence, so [write{a}@3, write{b}@10] stays write{a,b}@10
 // rather than replacing the payload with only {b}.
+//
+// Generation is deliberately not merged here: coalesceOps never folds an
+// operation carrying a compare-and-set check, because one command can only
+// carry one expected generation.
 func (p *pendingOp) fold(next *pendingOp) {
 	p.indexes = append(p.indexes, next.indexes...)
 
@@ -173,7 +177,6 @@ func (p *pendingOp) fold(next *pendingOp) {
 	}
 
 	p.ttl = next.ttl
-	p.generation, p.hasGeneration = next.generation, next.hasGeneration
 	if next.hasFence {
 		p.fence, p.hasFence = next.fence, true
 	}
@@ -213,14 +216,53 @@ func (p *pendingOp) fold(next *pendingOp) {
 			p.copyBinsFrom(next)
 		}
 	case opWrite:
-		if p.kind == opDelete {
+		switch p.kind {
+		case opDelete:
 			p.kind = opReplace
 			p.resetBins()
-		} else if p.kind == opCreateOnly || p.kind == opUpdateOnly {
+		case opCreateOnly, opUpdateOnly:
 			p.kind = opWrite
 		}
 		p.copyBinsFrom(next)
 	}
+}
+
+// coalesceOps folds repeated writes to one record key into a single command,
+// preserving the outcome of applying them in sequence.
+//
+// A key touched by any compare-and-set message is exempt and keeps one command
+// per message. A generation check is a statement about the specific record the
+// caller read, and a folded command can carry only one expected generation:
+// folding would either drop the check (letting a write land on a record that
+// changed underneath it) or apply a generation the server never reached
+// (failing both messages). Neither is acceptable silently, so CAS wins over
+// coalescing and the server arbitrates.
+func coalesceOps(ops []*pendingOp) []*pendingOp {
+	ids := make([]string, len(ops))
+	exempt := map[string]bool{}
+	for i, op := range ops {
+		ids[i] = KeyID(op.key)
+		if op.hasGeneration {
+			exempt[ids[i]] = true
+		}
+	}
+
+	out := make([]*pendingOp, 0, len(ops))
+	byKey := make(map[string]*pendingOp, len(ops))
+	for i, op := range ops {
+		id := ids[i]
+		if exempt[id] {
+			out = append(out, op)
+			continue
+		}
+		if prev, exists := byKey[id]; exists {
+			prev.fold(op)
+			continue
+		}
+		byKey[id] = op
+		out = append(out, op)
+	}
+	return out
 }
 
 // batchMapper maps one batch of messages into pending writes.

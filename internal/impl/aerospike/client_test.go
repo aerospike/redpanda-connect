@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -171,6 +171,11 @@ func TestParseHost(t *testing.T) {
 		{in: "as1.internal:3100", name: "as1.internal", port: 3100},
 		{in: "as1.internal:clusterA:3000", name: "as1.internal", tlsName: "clusterA", port: 3000},
 		{in: "as1.internal:clusterA", name: "as1.internal", tlsName: "clusterA", port: 3000},
+		// A TLS certificate name may begin with a digit, so only a wholly
+		// numeric component is a port.
+		{in: "as1.internal:1cluster", name: "as1.internal", tlsName: "1cluster", port: 3000},
+		{in: "as1.internal:1cluster:4333", name: "as1.internal", tlsName: "1cluster", port: 4333},
+		{in: "as1.internal:99999", wantErr: "out of range"},
 		{in: "127.0.0.1", name: "127.0.0.1", port: 3000},
 		{in: "::1", name: "::1", port: 3000},
 		{in: "[::1]:3000", name: "::1", port: 3000},
@@ -261,6 +266,62 @@ func parseBatchYAML(t *testing.T, yaml string) (*as.BatchPolicy, error) {
 		return nil, err
 	}
 	return ParseBatchPolicy(parsed)
+}
+
+// An unlimited total timeout must not be read as "no limit of any kind": the
+// socket timeout is the only thing left bounding a stuck connection.
+func TestBatchPolicyForContextKeepsSocketTimeoutWhenTotalIsUnlimited(t *testing.T) {
+	p := as.NewBatchPolicy()
+	p.TotalTimeout = 0
+	p.SocketTimeout = 5 * time.Second
+
+	got, err := BatchPolicyForContext(context.Background(), p)
+	require.NoError(t, err)
+	assert.Zero(t, got.TotalTimeout)
+	assert.Equal(t, 5*time.Second, got.SocketTimeout)
+}
+
+func TestParseClientConfigConnectionPoolBounds(t *testing.T) {
+	parse := func(t *testing.T, extra string) (*ClientConfig, error) {
+		t.Helper()
+		conf, err := outputSpec().ParseYAML(baseConfig+extra, nil)
+		require.NoError(t, err)
+		return ParseClientConfig(conf)
+	}
+
+	// Warm up fills to the minimum, so a zero minimum means the default config
+	// does not open a pool-sized burst of connections to every node on start.
+	t.Run("min defaults to zero", func(t *testing.T) {
+		c, err := parse(t, "")
+		require.NoError(t, err)
+		assert.Zero(t, c.Policy.MinConnectionsPerNode)
+		assert.Equal(t, 100, c.Policy.ConnectionQueueSize)
+	})
+
+	t.Run("min above max is rejected", func(t *testing.T) {
+		_, err := parse(t, "max_connections_per_node: 10\nmin_connections_per_node: 20\n")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must not exceed")
+	})
+
+	t.Run("error rate circuit breaker is configurable", func(t *testing.T) {
+		c, err := parse(t, "max_error_rate: 25\nerror_rate_window: 3\n")
+		require.NoError(t, err)
+		assert.Equal(t, 25, c.Policy.MaxErrorRate)
+		assert.Equal(t, 3, c.Policy.ErrorRateWindow)
+	})
+}
+
+func TestValidateNamespaceName(t *testing.T) {
+	require.NoError(t, ValidateNamespaceName("test"))
+
+	err := ValidateNamespaceName("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty")
+
+	err = ValidateNamespaceName(strings.Repeat("n", MaxNamespaceNameLen+1))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds the Aerospike limit of 31")
 }
 
 func TestParseBatchPolicyRejectsNegatives(t *testing.T) {
@@ -376,7 +437,7 @@ namespace: test
 key: '${! json("id") }'
 `, msg)
 	require.NoError(t, err)
-	assert.Equal(t, "", key.SetName())
+	assert.Empty(t, key.SetName())
 }
 
 func TestKeyBytesBase64(t *testing.T) {

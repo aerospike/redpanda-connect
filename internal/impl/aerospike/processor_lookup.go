@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
@@ -30,6 +31,7 @@ const (
 	fieldNotFound     = "not_found"
 	fieldEmitMetadata = "emit_metadata"
 	fieldTombstoneBin = "tombstone_bin"
+	fieldFenceBin     = "fence_bin"
 
 	// "null" would be parsed as a YAML null rather than a string, so the option
 	// that emits a null result has to be named something YAML leaves alone.
@@ -48,6 +50,7 @@ func init() {
 func lookupSpec() *service.ConfigSpec {
 	spec := service.NewConfigSpec().
 		Beta().
+		Version("4.107.0").
 		Categories("Services").
 		Summary("Looks up Aerospike records by primary key and replaces each message with the record's bins.").
 		Description(`
@@ -97,13 +100,18 @@ scope: denormalise into the record the write path stores, or issue another keyed
 			Default(notFoundNull),
 
 		service.NewBoolField(fieldEmitMetadata).
-			Description("Attach `aerospike_generation` and `aerospike_ttl` metadata from the record. The output's `generation` field reads `aerospike_generation` for compare-and-set writes.").
+			Description("Attach `aerospike_generation` and `aerospike_ttl` metadata from the record. Both are written in the form the Aerospike output accepts, so `generation` reads `aerospike_generation` for a compare-and-set write and `ttl` reads `aerospike_ttl` to carry an expiration across a read-modify-write. A record that never expires reports its TTL as `never`.").
 			Default(false).
 			Advanced(),
 
 		service.NewStringField(fieldTombstoneBin).
-			Description("Treat a record that carries this bin as missing. Must match `fencing.tombstone_bin` on the Aerospike output when fencing is enabled. Empty disables the check.").
+			Description("Treat a record that carries this bin as missing, and strip it from the emitted document. Must match `fencing.tombstone_bin` on the Aerospike output when fencing is enabled. Empty disables the check.").
 			Default(DefaultTombstoneBin).
+			Advanced(),
+
+		service.NewStringField(fieldFenceBin).
+			Description("Strip this bin from the emitted document. Fencing bookkeeping is not part of the record's data, so leaving it in place would graft an internal field onto every enriched message. Must match `fencing.bin` on the Aerospike output when fencing is enabled. Empty disables the check.").
+			Default(DefaultFenceBin).
 			Advanced(),
 	)
 	spec = spec.Fields(BatchPolicyFields()...)
@@ -149,11 +157,15 @@ type lookupConfig struct {
 	client *ClientConfig
 	keys   *KeyConfig
 
+	// binNames is what the client is asked for, which includes the tombstone
+	// bin when it is not already named: a record can only be recognised as a
+	// fenced delete if that bin was actually read.
 	binNames     []string
 	readAllBins  bool
 	notFound     string
 	emitMetadata bool
 	tombstoneBin string
+	fenceBin     string
 
 	batchPolicy *as.BatchPolicy
 	readPolicy  *as.BatchReadPolicy
@@ -195,6 +207,21 @@ func parseLookupConfig(conf *service.ParsedConfig) (*lookupConfig, error) {
 		if err := ValidateBinName(c.tombstoneBin); err != nil {
 			return nil, fmt.Errorf("field '%v': %w", fieldTombstoneBin, err)
 		}
+	}
+	if c.fenceBin, err = conf.FieldString(fieldFenceBin); err != nil {
+		return nil, err
+	}
+	if c.fenceBin != "" {
+		if err := ValidateBinName(c.fenceBin); err != nil {
+			return nil, fmt.Errorf("field '%v': %w", fieldFenceBin, err)
+		}
+	}
+
+	// The tombstone check needs the bin to have been read, so request it
+	// alongside the named bins. Doing this once here keeps it off the per-key
+	// path in planReads.
+	if !c.readAllBins && c.tombstoneBin != "" && !slices.Contains(c.binNames, c.tombstoneBin) {
+		c.binNames = append(slices.Clone(c.binNames), c.tombstoneBin)
 	}
 
 	c.readPolicy = as.NewBatchReadPolicy()
@@ -274,9 +301,9 @@ func (p *lookupProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 	// The incoming batch must not be mutated.
 	out := batch.Copy()
 
-	reads, _ := p.planReads(out)
+	reads := p.planReads(out)
 	if len(reads) == 0 {
-		return p.assemble(out, nil), nil
+		return assemble(out, nil), nil
 	}
 
 	records := make([]as.BatchRecordIfc, len(reads))
@@ -311,14 +338,14 @@ func (p *lookupProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 		}
 	}
 
-	return p.assemble(out, dropped), nil
+	return assemble(out, dropped), nil
 }
 
 // planReads resolves a key per message and deduplicates them, so a batch that
-// references the same entity many times issues one read for it.
-func (p *lookupProcessor) planReads(batch service.MessageBatch) ([]*pendingRead, map[int]bool) {
+// references the same entity many times issues one read for it. Messages whose
+// key cannot be resolved are marked in place and contribute no read.
+func (p *lookupProcessor) planReads(batch service.MessageBatch) []*pendingRead {
 	resolver := p.conf.keys.Resolver(batch)
-	failed := map[int]bool{}
 
 	reads := make([]*pendingRead, 0, len(batch))
 	byKey := make(map[string]*pendingRead, len(batch))
@@ -327,7 +354,6 @@ func (p *lookupProcessor) planReads(batch service.MessageBatch) ([]*pendingRead,
 		key, err := resolver.Key(i)
 		if err != nil {
 			batch[i].SetError(err)
-			failed[i] = true
 			continue
 		}
 
@@ -337,29 +363,16 @@ func (p *lookupProcessor) planReads(batch service.MessageBatch) ([]*pendingRead,
 			continue
 		}
 
-		binNames := p.conf.binNames
-		if !p.conf.readAllBins && p.conf.tombstoneBin != "" {
-			found := false
-			for _, name := range binNames {
-				if name == p.conf.tombstoneBin {
-					found = true
-					break
-				}
-			}
-			if !found {
-				binNames = append(append([]string{}, binNames...), p.conf.tombstoneBin)
-			}
-		}
-
-		read := as.NewBatchRead(p.conf.readPolicy, key, binNames)
-		read.ReadAllBins = p.conf.readAllBins
+		// NewBatchRead derives ReadAllBins from an empty bin list, which is
+		// what readAllBins already means, so no override is needed here.
+		read := as.NewBatchRead(p.conf.readPolicy, key, p.conf.binNames)
 
 		pending := &pendingRead{read: read, indexes: []int{i}}
 		byKey[id] = pending
 		reads = append(reads, pending)
 	}
 
-	return reads, failed
+	return reads
 }
 
 type resultAction int
@@ -379,14 +392,20 @@ func (p *lookupProcessor) applyResult(msg *service.Message, rec *as.BatchRecord)
 			return p.applyNotFound(msg)
 		}
 		out := FromAerospike(map[string]any(rec.Record.Bins))
-		if m, ok := out.(map[string]any); ok && p.conf.tombstoneBin != "" {
-			delete(m, p.conf.tombstoneBin)
+		if m, ok := out.(map[string]any); ok {
+			// Fencing bookkeeping is not part of the record's data; leaving it
+			// in place grafts an internal field onto every enriched message.
+			for _, bin := range [...]string{p.conf.tombstoneBin, p.conf.fenceBin} {
+				if bin != "" {
+					delete(m, bin)
+				}
+			}
 			out = m
 		}
 		msg.SetStructuredMut(out)
 		if p.conf.emitMetadata {
 			msg.MetaSetMut(metaGeneration, int(rec.Record.Generation))
-			msg.MetaSetMut(metaTTL, int(rec.Record.Expiration))
+			msg.MetaSetMut(metaTTL, formatTTL(rec.Record.Expiration))
 		}
 		return resultKeep
 
@@ -416,7 +435,7 @@ func (p *lookupProcessor) applyNotFound(msg *service.Message) resultAction {
 // assemble builds the outgoing batch, omitting dropped messages. Messages whose
 // key could not be resolved never enter the drop set, so they keep their
 // original content and carry an error.
-func (p *lookupProcessor) assemble(batch service.MessageBatch, dropped map[int]bool) []service.MessageBatch {
+func assemble(batch service.MessageBatch, dropped map[int]bool) []service.MessageBatch {
 	if len(dropped) == 0 {
 		return []service.MessageBatch{batch}
 	}

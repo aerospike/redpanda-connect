@@ -25,6 +25,8 @@ component_type_dropdown::[]
 
 Writes messages to an Aerospike cluster as records, batched and keyed by an interpolated primary key.
 
+Introduced in version 4.107.0.
+
 
 [tabs]
 ======
@@ -71,7 +73,10 @@ output:
     use_services_alternate: false
     connect_timeout: 30s
     max_connections_per_node: 100
+    min_connections_per_node: 0
     warm_up: true
+    max_error_rate: 100
+    error_rate_window: 1
     credentials:
       username: ""
       password: ""
@@ -100,7 +105,7 @@ output:
     commit_level: all
     max_record_bytes: 0
     concurrent_nodes: 0
-    socket_timeout: 1s
+    socket_timeout: 5s
     total_timeout: 10s
     max_retries: 0
     fencing:
@@ -147,9 +152,18 @@ do not treat lookup as a join.
 
 Writes are dispatched with a single batch command per output batch. Aerospike enforces
 concurrency limits per record, so multiple messages for the same key inside one batch are
-coalesced into one write by default (see `coalesce_batch_keys`). This avoids
-`KEY_BUSY` errors and preserves per-partition ordering. Disable it only if you need
-strict one-message-one-write semantics (including per-message `create_only`/`update_only` existence failures) and have confirmed keys do not repeat.
+coalesced into one write by default (see `coalesce_batch_keys`). Disable it only if
+you need strict one-message-one-write semantics (including per-message
+`create_only`/`update_only` existence failures) and have confirmed keys do
+not repeat.
+
+Coalescing applies **within a single batch only**. With the default
+`max_in_flight` of 64, batches are dispatched concurrently, so two batches in flight
+at the same time can still carry the same record key — which reorders those two writes with
+respect to each other and can produce `KEY_BUSY`. If a record key must never be
+written concurrently, or writes to one key must land in stream order, set
+`max_in_flight: 1`. That serialises the output, so prefer larger batches to recover
+throughput.
 
 ### Delivery guarantees
 
@@ -281,21 +295,48 @@ Timeout for establishing the initial cluster connection. Capped by the remaining
 
 === `max_connections_per_node`
 
-Size of the client connection pool per cluster node.
+Maximum size of the client connection pool per cluster node. The client opens connections to every node, so budget `max_connections_per_node` multiplied by the number of processes against the server's `proto-fd-max`.
 
 
 *Type*: `int`
 
 *Default*: `100`
 
+=== `min_connections_per_node`
+
+Number of connections per node to keep open even while idle, so a burst after a quiet period does not pay reconnect cost. This is also how many connections `warm_up` opens. Keep it only as high as the steady-state concurrency needs: every connection is a file descriptor on the node, and with TLS a large pool makes startup and reconnect expensive in server CPU.
+
+
+*Type*: `int`
+
+*Default*: `0`
+
 === `warm_up`
 
-Fill the connection pool on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands.
+Open `min_connections_per_node` connections on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands. Has no effect when `min_connections_per_node` is `0`.
 
 
 *Type*: `bool`
 
 *Default*: `true`
+
+=== `max_error_rate`
+
+Errors permitted from a single node per `error_rate_window` before the client stops sending it commands and fails fast instead. This is a circuit breaker: it stops a pipeline from hammering a node that is already failing. `0` disables it.
+
+
+*Type*: `int`
+
+*Default*: `100`
+
+=== `error_rate_window`
+
+Number of cluster tend iterations that make up the window for `max_error_rate`.
+
+
+*Type*: `int`
+
+*Default*: `1`
 
 === `credentials`
 
@@ -651,6 +692,8 @@ bins: |-
 
 Store JSON numbers with no fractional part as Aerospike integers rather than doubles. JSON has a single number type, so without this an identifier or counter arrives as a double, which breaks integer comparisons, `add` operations and integer secondary indexes.
 
+The trade-off is that the stored type then depends on the value: a `price` bin holding `10.0` is written as an integer while `10.5` is written as a double. Aerospike types bins per record rather than per set, so this raises no error, but an integer secondary index over such a bin only indexes the records that happened to be integral. Disable this for bins that are genuinely floating point, or coerce the type explicitly in the `bins` mapping.
+
 
 *Type*: `bool`
 
@@ -685,6 +728,8 @@ ttl: keep
 === `generation`
 
 Expected record generation for a compare-and-set write. When set, the write fails if the stored generation does not match. Empty disables the check. Pair with `aerospike_lookup` `emit_metadata`, which sets `aerospike_generation` on the looked-up message.
+
+A compare-and-set message is never coalesced, even with `coalesce_batch_keys` enabled: the check refers to the specific record that was read, and one command can carry only one expected generation. If several messages in a batch target the same key and any of them carries a generation, each is sent as its own command and the server arbitrates. On `GENERATION_ERROR` the correct recovery is to re-read the record and redo the change, not to retry the same write.
 This field supports xref:configuration:interpolation.adoc#bloblang-queries[interpolation functions].
 
 
@@ -719,6 +764,8 @@ Write a tombstone on delete so deleted records cannot reappear after a cold rest
 === `coalesce_batch_keys`
 
 Collapse multiple messages for the same record key within a batch into a single write. Strongly recommended: sending them separately contends on one record, which surfaces as `KEY_BUSY` or as latency inflation with no error at all. Mixing `create_only` or `update_only` with `write`/`replace`/`delete` for the same key drops the existence check so a successful write is not nacked as `KEY_EXISTS`/`KEY_NOT_FOUND`.
+
+Messages carrying a `generation` are never coalesced, and coalescing only ever applies within one batch — see `max_in_flight` for what happens across concurrent batches.
 
 
 *Type*: `bool`
@@ -755,7 +802,7 @@ Reject a mapped record whose bins exceed this many bytes (approximate). `0` disa
 
 === `concurrent_nodes`
 
-How many cluster nodes to issue batch sub-requests to concurrently. `0` means all of them in parallel.
+How many cluster nodes to issue batch sub-requests to concurrently. `0` means all of them in parallel. Note this defaults to fanning out where the Aerospike client itself defaults to `1` (one node at a time); combined with `max_in_flight` it multiplies the load a single pipeline can place on a cluster, so lower it if the cluster is the bottleneck.
 
 
 *Type*: `int`
@@ -764,12 +811,12 @@ How many cluster nodes to issue batch sub-requests to concurrently. `0` means al
 
 === `socket_timeout`
 
-Per-attempt socket timeout for a batch command. Capped by the remaining pipeline context deadline when one is set.
+Per-attempt socket timeout for a batch command. Capped by the remaining pipeline context deadline when one is set. A whole batch has to complete within this window, so raise it if batches are large or the cluster is loaded — with `max_retries` at `0` a socket timeout fails the batch rather than being retried.
 
 
 *Type*: `string`
 
-*Default*: `"1s"`
+*Default*: `"5s"`
 
 === `total_timeout`
 
@@ -815,7 +862,7 @@ Enable fencing.
 
 === `fencing.bin`
 
-Bin holding the fence value. Counts toward the 15 character bin name limit.
+Bin holding the fence value. Counts toward the 15 character bin name limit. Must match `fence_bin` on `aerospike_lookup`, which strips it from the records it emits.
 
 
 *Type*: `string`
@@ -853,6 +900,8 @@ Bin written on a fenced delete to mark the record as a tombstone. Lookups treat 
 
 Time-to-live for fenced tombstone records. Accepts a duration, or `never`. Defaults to `never` so the fence outlives the data TTL; if the tombstone expires, a stale replay can recreate the record.
 
+Note that `never` means fenced deletes accumulate without bound: the records stay small, but Aerospike does not evict records that have no void-time, so a delete-heavy workload grows the namespace monotonically. Set a duration comfortably longer than the longest replay or redelivery window you need to defend against — beyond that point a replay is no longer a realistic risk — and budget the primary index at roughly 64 bytes per record per replica in the meantime.
+
 
 *Type*: `string`
 
@@ -866,7 +915,7 @@ tombstone_ttl: 168h
 
 === `batching`
 
-Allows you to configure a batching policy. When this object is omitted, the output batches 256 messages or 1s, whichever comes first — an unbatched database sink round-trips per message. Generated docs may show `count: 0`; that still applies this default. Set `count: 1` to write one message per command.
+Allows you to configure a batching policy. When this object is omitted, the output applies a default of 256 messages or 1s, whichever comes first, because an unbatched database sink round-trips per message. The field reference below shows `count: 0`, which is how the framework renders an unset policy — the default above is what actually runs, and the output logs it on startup. Set `count: 1` to write one message per command.
 
 
 *Type*: `object`
@@ -968,7 +1017,7 @@ processors:
 
 === `max_in_flight`
 
-Maximum number of batches to have in flight concurrently.
+Maximum number of batches to have in flight concurrently. Note that key coalescing only deduplicates within a batch, so a value above `1` allows two concurrent batches to write the same record key, reordering them relative to each other. Set this to `1` when writes to a key must land in stream order.
 
 
 *Type*: `int`

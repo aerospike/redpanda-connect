@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package aerospike
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"github.com/redpanda-data/benthos/v4/public/service"
 )
 
+// Configuration field names that address an Aerospike record.
 const (
 	FieldNamespace   = "namespace"
 	FieldSet         = "set"
@@ -37,6 +39,9 @@ const (
 	// namespace (1024 on older servers, 32767 on 7+) and cannot be dropped
 	// except by truncating, so interpolating an unbounded value is costly.
 	MaxSetNameLen = 63
+
+	// MaxNamespaceNameLen is the server limit on namespace names.
+	MaxNamespaceNameLen = 31
 )
 
 // KeyFields returns the fields that address an Aerospike record.
@@ -134,8 +139,8 @@ func (r *KeyResolver) Key(index int) (*as.Key, error) {
 	if err != nil {
 		return nil, fmt.Errorf("interpolating '%v': %w", FieldNamespace, err)
 	}
-	if namespace == "" {
-		return nil, fmt.Errorf("field '%v' resolved to an empty string", FieldNamespace)
+	if err := ValidateNamespaceName(namespace); err != nil {
+		return nil, fmt.Errorf("field '%v': %w", FieldNamespace, err)
 	}
 
 	setName, err := r.set.TryString(index)
@@ -211,6 +216,19 @@ func decodeBytesKey(s, encoding string) (any, error) {
 	default:
 		return nil, fmt.Errorf("field '%v': unknown encoding %q", FieldKeyEncoding, encoding)
 	}
+}
+
+// ValidateNamespaceName checks a resolved namespace against the server's
+// limits. An over-long name is rejected by the server as INVALID_NAMESPACE,
+// which reads like a missing namespace rather than a malformed one.
+func ValidateNamespaceName(name string) error {
+	if name == "" {
+		return errors.New("resolved to an empty string")
+	}
+	if len(name) > MaxNamespaceNameLen {
+		return fmt.Errorf("namespace %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), MaxNamespaceNameLen)
+	}
+	return nil
 }
 
 // ValidateSetName checks a resolved set name against the server's limits.

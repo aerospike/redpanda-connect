@@ -25,6 +25,8 @@ component_type_dropdown::[]
 
 Looks up Aerospike records by primary key and replaces each message with the record's bins.
 
+Introduced in version 4.107.0.
+
 
 [tabs]
 ======
@@ -59,7 +61,10 @@ aerospike_lookup:
   use_services_alternate: false
   connect_timeout: 30s
   max_connections_per_node: 100
+  min_connections_per_node: 0
   warm_up: true
+  max_error_rate: 100
+  error_rate_window: 1
   credentials:
     username: ""
     password: ""
@@ -80,8 +85,9 @@ aerospike_lookup:
   not_found: emit_null
   emit_metadata: false
   tombstone_bin: _deleted
+  fence_bin: _fence
   concurrent_nodes: 0
-  socket_timeout: 1s
+  socket_timeout: 5s
   total_timeout: 10s
   max_retries: 2
   replica: sequence
@@ -221,21 +227,48 @@ Timeout for establishing the initial cluster connection. Capped by the remaining
 
 === `max_connections_per_node`
 
-Size of the client connection pool per cluster node.
+Maximum size of the client connection pool per cluster node. The client opens connections to every node, so budget `max_connections_per_node` multiplied by the number of processes against the server's `proto-fd-max`.
 
 
 *Type*: `int`
 
 *Default*: `100`
 
+=== `min_connections_per_node`
+
+Number of connections per node to keep open even while idle, so a burst after a quiet period does not pay reconnect cost. This is also how many connections `warm_up` opens. Keep it only as high as the steady-state concurrency needs: every connection is a file descriptor on the node, and with TLS a large pool makes startup and reconnect expensive in server CPU.
+
+
+*Type*: `int`
+
+*Default*: `0`
+
 === `warm_up`
 
-Fill the connection pool on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands.
+Open `min_connections_per_node` connections on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands. Has no effect when `min_connections_per_node` is `0`.
 
 
 *Type*: `bool`
 
 *Default*: `true`
+
+=== `max_error_rate`
+
+Errors permitted from a single node per `error_rate_window` before the client stops sending it commands and fails fast instead. This is a circuit breaker: it stops a pipeline from hammering a node that is already failing. `0` disables it.
+
+
+*Type*: `int`
+
+*Default*: `100`
+
+=== `error_rate_window`
+
+Number of cluster tend iterations that make up the window for `max_error_rate`.
+
+
+*Type*: `int`
+
+*Default*: `1`
 
 === `credentials`
 
@@ -570,7 +603,7 @@ Options:
 
 === `emit_metadata`
 
-Attach `aerospike_generation` and `aerospike_ttl` metadata from the record. The output's `generation` field reads `aerospike_generation` for compare-and-set writes.
+Attach `aerospike_generation` and `aerospike_ttl` metadata from the record. Both are written in the form the Aerospike output accepts, so `generation` reads `aerospike_generation` for a compare-and-set write and `ttl` reads `aerospike_ttl` to carry an expiration across a read-modify-write. A record that never expires reports its TTL as `never`.
 
 
 *Type*: `bool`
@@ -579,16 +612,25 @@ Attach `aerospike_generation` and `aerospike_ttl` metadata from the record. The 
 
 === `tombstone_bin`
 
-Treat a record that carries this bin as missing. Must match `fencing.tombstone_bin` on the Aerospike output when fencing is enabled. Empty disables the check.
+Treat a record that carries this bin as missing, and strip it from the emitted document. Must match `fencing.tombstone_bin` on the Aerospike output when fencing is enabled. Empty disables the check.
 
 
 *Type*: `string`
 
 *Default*: `"_deleted"`
 
+=== `fence_bin`
+
+Strip this bin from the emitted document. Fencing bookkeeping is not part of the record's data, so leaving it in place would graft an internal field onto every enriched message. Must match `fencing.bin` on the Aerospike output when fencing is enabled. Empty disables the check.
+
+
+*Type*: `string`
+
+*Default*: `"_fence"`
+
 === `concurrent_nodes`
 
-How many cluster nodes to issue batch sub-requests to concurrently. `0` means all of them in parallel.
+How many cluster nodes to issue batch sub-requests to concurrently. `0` means all of them in parallel. Note this defaults to fanning out where the Aerospike client itself defaults to `1` (one node at a time); combined with `max_in_flight` it multiplies the load a single pipeline can place on a cluster, so lower it if the cluster is the bottleneck.
 
 
 *Type*: `int`
@@ -597,12 +639,12 @@ How many cluster nodes to issue batch sub-requests to concurrently. `0` means al
 
 === `socket_timeout`
 
-Per-attempt socket timeout for a batch command. Capped by the remaining pipeline context deadline when one is set.
+Per-attempt socket timeout for a batch command. Capped by the remaining pipeline context deadline when one is set. A whole batch has to complete within this window, so raise it if batches are large or the cluster is loaded — with `max_retries` at `0` a socket timeout fails the batch rather than being retried.
 
 
 *Type*: `string`
 
-*Default*: `"1s"`
+*Default*: `"5s"`
 
 === `total_timeout`
 

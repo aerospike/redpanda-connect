@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@ package aerospike
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
@@ -55,15 +54,16 @@ func TestWriteBatchPartialFailure(t *testing.T) {
 		return nil
 	}
 
-	err := w.WriteBatch(t.Context(), service.MessageBatch{
-		service.NewMessage([]byte(`{"id":"u1","v":1}`)),
-	})
+	batch := service.MessageBatch{service.NewMessage([]byte(`{"id":"u1","v":1}`))}
+	indexer := batch.Index()
+
+	err := w.WriteBatch(t.Context(), batch)
 	require.Error(t, err)
 	var berr *service.BatchError
-	require.True(t, errors.As(err, &berr), "%T: %v", err, err)
+	require.ErrorAs(t, err, &berr)
 	require.Equal(t, 1, berr.IndexedErrors())
 	var msgErr error
-	berr.WalkMessages(func(_ int, _ *service.Message, e error) bool {
+	berr.WalkMessagesIndexedBy(indexer, func(_ int, _ *service.Message, e error) bool {
 		msgErr = e
 		return false
 	})

@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -56,6 +56,7 @@ const (
 func outputSpec() *service.ConfigSpec {
 	spec := service.NewConfigSpec().
 		Beta().
+		Version("4.107.0").
 		Categories("Services").
 		Summary("Writes messages to an Aerospike cluster as records, batched and keyed by an interpolated primary key.").
 		Description(`
@@ -85,9 +86,18 @@ do not treat lookup as a join.
 
 Writes are dispatched with a single batch command per output batch. Aerospike enforces
 concurrency limits per record, so multiple messages for the same key inside one batch are
-coalesced into one write by default (see ` + "`coalesce_batch_keys`" + `). This avoids
-` + "`KEY_BUSY`" + ` errors and preserves per-partition ordering. Disable it only if you need
-strict one-message-one-write semantics (including per-message ` + "`create_only`" + `/` + "`update_only`" + ` existence failures) and have confirmed keys do not repeat.
+coalesced into one write by default (see ` + "`coalesce_batch_keys`" + `). Disable it only if
+you need strict one-message-one-write semantics (including per-message
+` + "`create_only`" + `/` + "`update_only`" + ` existence failures) and have confirmed keys do
+not repeat.
+
+Coalescing applies **within a single batch only**. With the default
+` + "`max_in_flight`" + ` of 64, batches are dispatched concurrently, so two batches in flight
+at the same time can still carry the same record key — which reorders those two writes with
+respect to each other and can produce ` + "`KEY_BUSY`" + `. If a record key must never be
+written concurrently, or writes to one key must land in stream order, set
+` + "`max_in_flight: 1`" + `. That serialises the output, so prefer larger batches to recover
+throughput.
 
 ### Delivery guarantees
 
@@ -136,7 +146,7 @@ root.updated = this.updated_at_epoch_seconds
 root.events = this.events.slice(0, 50)`),
 
 		service.NewBoolField(fieldCoerceIntegralFloats).
-			Description("Store JSON numbers with no fractional part as Aerospike integers rather than doubles. JSON has a single number type, so without this an identifier or counter arrives as a double, which breaks integer comparisons, `add` operations and integer secondary indexes.").
+			Description("Store JSON numbers with no fractional part as Aerospike integers rather than doubles. JSON has a single number type, so without this an identifier or counter arrives as a double, which breaks integer comparisons, `add` operations and integer secondary indexes.\n\nThe trade-off is that the stored type then depends on the value: a `price` bin holding `10.0` is written as an integer while `10.5` is written as a double. Aerospike types bins per record rather than per set, so this raises no error, but an integer secondary index over such a bin only indexes the records that happened to be integral. Disable this for bins that are genuinely floating point, or coerce the type explicitly in the `bins` mapping.").
 			Default(true).
 			Advanced(),
 
@@ -154,7 +164,7 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 			Example("keep"),
 
 		service.NewInterpolatedStringField(fieldGeneration).
-			Description("Expected record generation for a compare-and-set write. When set, the write fails if the stored generation does not match. Empty disables the check. Pair with `aerospike_lookup` `emit_metadata`, which sets `aerospike_generation` on the looked-up message.").
+			Description("Expected record generation for a compare-and-set write. When set, the write fails if the stored generation does not match. Empty disables the check. Pair with `aerospike_lookup` `emit_metadata`, which sets `aerospike_generation` on the looked-up message.\n\nA compare-and-set message is never coalesced, even with `coalesce_batch_keys` enabled: the check refers to the specific record that was read, and one command can carry only one expected generation. If several messages in a batch target the same key and any of them carries a generation, each is sent as its own command and the server arbitrates. On `GENERATION_ERROR` the correct recovery is to re-read the record and redo the change, not to retry the same write.").
 			Default("").
 			Example(`${! meta("aerospike_generation") }`).
 			Advanced(),
@@ -168,7 +178,7 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 			Default(false),
 
 		service.NewBoolField(fieldCoalesceBatchKeys).
-			Description("Collapse multiple messages for the same record key within a batch into a single write. Strongly recommended: sending them separately contends on one record, which surfaces as `KEY_BUSY` or as latency inflation with no error at all. Mixing `create_only` or `update_only` with `write`/`replace`/`delete` for the same key drops the existence check so a successful write is not nacked as `KEY_EXISTS`/`KEY_NOT_FOUND`.").
+			Description("Collapse multiple messages for the same record key within a batch into a single write. Strongly recommended: sending them separately contends on one record, which surfaces as `KEY_BUSY` or as latency inflation with no error at all. Mixing `create_only` or `update_only` with `write`/`replace`/`delete` for the same key drops the existence check so a successful write is not nacked as `KEY_EXISTS`/`KEY_NOT_FOUND`.\n\nMessages carrying a `generation` are never coalesced, and coalescing only ever applies within one batch — see `max_in_flight` for what happens across concurrent batches.").
 			Default(true).
 			Advanced(),
 
@@ -187,8 +197,8 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 				Description("Enable fencing.").
 				Default(false),
 			service.NewStringField(fieldFencingBin).
-				Description("Bin holding the fence value. Counts toward the 15 character bin name limit.").
-				Default("_fence"),
+				Description("Bin holding the fence value. Counts toward the 15 character bin name limit. Must match `fence_bin` on `aerospike_lookup`, which strips it from the records it emits.").
+				Default(DefaultFenceBin),
 			service.NewInterpolatedStringField(fieldFencingValue).
 				Description("An integer that increases monotonically for a given record key. The Kafka offset satisfies this when keys map to partitions consistently, which is the default partitioner's behaviour.").
 				Default(`${! meta("kafka_offset") }`).
@@ -198,7 +208,9 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 				Description("Bin written on a fenced delete to mark the record as a tombstone. Lookups treat a record carrying this bin as missing. Counts toward the 15 character bin name limit.").
 				Default(DefaultTombstoneBin),
 			service.NewStringField(fieldFencingTombstoneTTL).
-				Description(`Time-to-live for fenced tombstone records. Accepts a duration, or `+"`never`"+`. Defaults to `+"`never`"+` so the fence outlives the data TTL; if the tombstone expires, a stale replay can recreate the record.`).
+				Description(`Time-to-live for fenced tombstone records. Accepts a duration, or `+"`never`"+`. Defaults to `+"`never`"+` so the fence outlives the data TTL; if the tombstone expires, a stale replay can recreate the record.
+
+Note that `+"`never`"+` means fenced deletes accumulate without bound: the records stay small, but Aerospike does not evict records that have no void-time, so a delete-heavy workload grows the namespace monotonically. Set a duration comfortably longer than the longest replay or redelivery window you need to defend against — beyond that point a replay is no longer a realistic risk — and budget the primary index at roughly 64 bytes per record per replica in the meantime.`).
 				Default("never").
 				Example("168h"),
 		).Description(`Guards each write with a server-side filter expression so that a record is only
@@ -212,10 +224,10 @@ tombstone as not found. `+"`create_only`"+` after a fenced delete fails because 
 			Advanced(),
 
 		service.NewBatchPolicyField(fieldBatching).
-			Description(fmt.Sprintf("Allows you to configure a batching policy. When this object is omitted, the output batches %d messages or %s, whichever comes first — an unbatched database sink round-trips per message. Generated docs may show `count: 0`; that still applies this default. Set `count: 1` to write one message per command.", defaultBatchCount, defaultBatchPeriod)),
+			Description(fmt.Sprintf("Allows you to configure a batching policy. When this object is omitted, the output applies a default of %d messages or %s, whichever comes first, because an unbatched database sink round-trips per message. The field reference below shows `count: 0`, which is how the framework renders an unset policy — the default above is what actually runs, and the output logs it on startup. Set `count: 1` to write one message per command.", defaultBatchCount, defaultBatchPeriod)),
 
 		service.NewOutputMaxInFlightField().
-			Description("Maximum number of batches to have in flight concurrently."),
+			Description("Maximum number of batches to have in flight concurrently. Note that key coalescing only deduplicates within a batch, so a value above `1` allows two concurrent batches to write the same record key, reordering them relative to each other. Set this to `1` when writes to a key must land in stream order."),
 	).
 		Example(
 			"Stream a topic into Aerospike",
@@ -449,4 +461,15 @@ func parseTTL(s string) (uint32, error) {
 		return 0, fmt.Errorf("invalid ttl %q: exceeds the maximum expiration", s)
 	}
 	return uint32(secs), nil
+}
+
+// formatTTL renders a record's expiration in the form parseTTL accepts, so a
+// TTL read by aerospike_lookup can be fed straight back into the output's ttl
+// field. The client reports a record that never expires as a sentinel rather
+// than a duration, which would otherwise surface to the user as "4294967295".
+func formatTTL(expiration uint32) string {
+	if expiration == as.TTLDontExpire {
+		return "never"
+	}
+	return (time.Duration(expiration) * time.Second).String()
 }

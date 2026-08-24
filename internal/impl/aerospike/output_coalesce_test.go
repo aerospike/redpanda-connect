@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -262,6 +262,56 @@ func TestFold(t *testing.T) {
 	}
 }
 
+// A compare-and-set write must never be folded. Folding it either drops the
+// check, letting a write land on a record that changed underneath it, or
+// carries a generation the server never reached, failing both messages.
+func TestCoalesceExemptsGenerationCheckedKeys(t *testing.T) {
+	checked := opWith(t, 0, "u1", opWrite, map[string]any{"a": 1})
+	checked.generation, checked.hasGeneration = 7, true
+	unchecked := opWith(t, 1, "u1", opWrite, map[string]any{"b": 2})
+	other := opWith(t, 2, "u2", opWrite, map[string]any{"c": 3})
+
+	out := coalesceOps([]*pendingOp{checked, unchecked, other})
+
+	// The CAS-checked key keeps one command per message; the untouched key
+	// still coalesces normally.
+	require.Len(t, out, 3)
+	assert.Equal(t, []int{0}, out[0].indexes)
+	assert.True(t, out[0].hasGeneration)
+	assert.Equal(t, uint32(7), out[0].generation)
+	assert.Equal(t, []int{1}, out[1].indexes)
+	assert.Equal(t, []int{2}, out[2].indexes)
+}
+
+// The exemption has to cover every message for the key, not just the checked
+// one: a write folded into a neighbour would still be reordered around the CAS.
+func TestCoalesceExemptsWholeKeyWhenAnyMessageIsChecked(t *testing.T) {
+	first := opWith(t, 0, "u1", opWrite, map[string]any{"a": 1})
+	second := opWith(t, 1, "u1", opWrite, map[string]any{"b": 2})
+	third := opWith(t, 2, "u1", opWrite, map[string]any{"c": 3})
+	third.generation, third.hasGeneration = 9, true
+
+	out := coalesceOps([]*pendingOp{first, second, third})
+
+	require.Len(t, out, 3)
+	for i, op := range out {
+		assert.Equal(t, []int{i}, op.indexes)
+	}
+}
+
+func TestCoalesceFoldsWhenNoGenerationIsInvolved(t *testing.T) {
+	out := coalesceOps([]*pendingOp{
+		opWith(t, 0, "u1", opWrite, map[string]any{"a": 1}),
+		opWith(t, 1, "u1", opWrite, map[string]any{"b": 2}),
+		opWith(t, 2, "u2", opWrite, map[string]any{"c": 3}),
+	})
+
+	require.Len(t, out, 2)
+	assert.Equal(t, []int{0, 1}, out[0].indexes)
+	assert.Equal(t, map[string]any{"a": 1, "b": 2}, out[0].bins)
+	assert.Equal(t, []int{2}, out[1].indexes)
+}
+
 func TestFoldTracksAllSourceIndexes(t *testing.T) {
 	acc := opWith(t, 3, "u1", opWrite, map[string]any{"a": 1})
 	acc.fold(opWith(t, 7, "u1", opWrite, map[string]any{"b": 2}))
@@ -438,18 +488,9 @@ func TestBuildRecordDelete(t *testing.T) {
 }
 
 func TestBuildRecordFencedDeleteIsReplace(t *testing.T) {
-	w := newTestWriter(t, baseConfig+`
-fencing:
-  enabled: true
-  bin: _off
-  value: '${! meta("kafka_offset") }'
-`)
-
-	msg := service.NewMessage([]byte(``))
-	msg.MetaSet("kafka_offset", "4")
-	// Key interpolation uses json("id") in baseConfig; set a body that still
-	// counts as a tombstone after using an explicit key field instead.
-	w = newTestWriter(t, `
+	// An empty body is the tombstone, so the key has to come from metadata
+	// rather than from the body that baseConfig reads it out of.
+	w := newTestWriter(t, `
 hosts: [ "localhost:3000" ]
 namespace: test
 set: users
@@ -460,7 +501,7 @@ fencing:
   bin: _off
   value: '${! meta("kafka_offset") }'
 `)
-	msg = service.NewMessage([]byte(``))
+	msg := service.NewMessage([]byte(``))
 	msg.MetaSet("k", "u1")
 	msg.MetaSet("kafka_offset", "4")
 
@@ -489,18 +530,30 @@ func TestClassifyRecord(t *testing.T) {
 		// Deleting an absent record is the desired end state, which keeps
 		// deletes idempotent under redelivery.
 		{name: "missing key on delete is a success", code: types.KEY_NOT_FOUND_ERROR, kind: opDelete},
-		{name: "missing key on update_only fails", code: types.KEY_NOT_FOUND_ERROR, kind: opUpdateOnly,
-			wantErr: true, contains: "does not exist and the operation is update_only"},
-		{name: "key busy explains hot keys", code: types.KEY_BUSY, kind: opWrite,
-			wantErr: true, contains: "transaction-pending-limit"},
-		{name: "forbidden explains nsup-period", code: types.FAIL_FORBIDDEN, kind: opWrite,
-			wantErr: true, contains: "nsup-period"},
-		{name: "record too big explains remodelling", code: types.RECORD_TOO_BIG, kind: opWrite,
-			wantErr: true, contains: "max-record-size"},
-		{name: "invalid namespace explains config", code: types.INVALID_NAMESPACE, kind: opWrite,
-			wantErr: true, contains: "cannot be created at runtime"},
-		{name: "no response is retryable", code: types.NO_RESPONSE, kind: opWrite,
-			wantErr: true, contains: "retryable"},
+		{
+			name: "missing key on update_only fails", code: types.KEY_NOT_FOUND_ERROR, kind: opUpdateOnly,
+			wantErr: true, contains: "does not exist and the operation is update_only",
+		},
+		{
+			name: "key busy explains hot keys", code: types.KEY_BUSY, kind: opWrite,
+			wantErr: true, contains: "transaction-pending-limit",
+		},
+		{
+			name: "forbidden explains nsup-period", code: types.FAIL_FORBIDDEN, kind: opWrite,
+			wantErr: true, contains: "nsup-period",
+		},
+		{
+			name: "record too big explains remodelling", code: types.RECORD_TOO_BIG, kind: opWrite,
+			wantErr: true, contains: "max-record-size",
+		},
+		{
+			name: "invalid namespace explains config", code: types.INVALID_NAMESPACE, kind: opWrite,
+			wantErr: true, contains: "cannot be created at runtime",
+		},
+		{
+			name: "no response is retryable", code: types.NO_RESPONSE, kind: opWrite,
+			wantErr: true, contains: "retryable",
+		},
 	}
 
 	for _, tc := range tests {

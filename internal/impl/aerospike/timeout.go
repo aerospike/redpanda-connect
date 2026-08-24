@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -58,7 +58,10 @@ func BatchPolicyForContext(ctx context.Context, p *as.BatchPolicy) (*as.BatchPol
 		return nil, err
 	}
 	cp.TotalTimeout = total
-	if cp.SocketTimeout <= 0 || cp.SocketTimeout > total {
+	// total is 0 when the total timeout is configured as unlimited and the
+	// pipeline has no deadline. Clamping the socket timeout to it there would
+	// turn "no overall limit" into "no limit of any kind".
+	if total > 0 && (cp.SocketTimeout <= 0 || cp.SocketTimeout > total) {
 		cp.SocketTimeout = total
 	}
 	return &cp, nil

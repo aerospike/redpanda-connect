@@ -1,4 +1,4 @@
-// Copyright 2026 Aerospike, Inc.
+// Copyright 2026 Redpanda Data, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -53,8 +53,7 @@ func TestPlanReadsDeduplicates(t *testing.T) {
 		service.NewMessage([]byte(`{"user_id":"u1","evt":4}`)),
 	}
 
-	reads, failed := p.planReads(batch)
-	require.Empty(t, failed)
+	reads := p.planReads(batch)
 
 	// Four messages, two entities, two reads.
 	require.Len(t, reads, 2)
@@ -71,11 +70,9 @@ func TestPlanReadsIsolatesKeyFailures(t *testing.T) {
 		service.NewMessage([]byte(`{"user_id":"u3"}`)),
 	}
 
-	reads, failed := p.planReads(batch)
+	reads := p.planReads(batch)
 
 	assert.Len(t, reads, 2)
-	require.Len(t, failed, 1)
-	assert.True(t, failed[1])
 
 	// The bad message carries its own error and keeps its content.
 	require.Error(t, batch[1].GetError())
@@ -87,7 +84,7 @@ func TestReadAllBinsWhenNoneNamed(t *testing.T) {
 	assert.True(t, p.conf.readAllBins)
 
 	batch := service.MessageBatch{service.NewMessage([]byte(`{"user_id":"u1"}`))}
-	reads, _ := p.planReads(batch)
+	reads := p.planReads(batch)
 	require.Len(t, reads, 1)
 	// Without this the client reads only the record header, returning no bins.
 	assert.True(t, reads[0].read.ReadAllBins)
@@ -98,7 +95,7 @@ func TestNamedBinsAreRequested(t *testing.T) {
 	assert.False(t, p.conf.readAllBins)
 
 	batch := service.MessageBatch{service.NewMessage([]byte(`{"user_id":"u1"}`))}
-	reads, _ := p.planReads(batch)
+	reads := p.planReads(batch)
 	require.Len(t, reads, 1)
 	assert.False(t, reads[0].read.ReadAllBins)
 	assert.Equal(t, []string{"tier", "ltv", DefaultTombstoneBin}, reads[0].read.BinNames)
@@ -114,15 +111,13 @@ func TestConfigRejectsLongBinName(t *testing.T) {
 }
 
 func TestAssembleRemovesDropped(t *testing.T) {
-	p := newTestProcessor(t, lookupBaseConfig+"not_found: drop\n")
-
 	batch := service.MessageBatch{
 		service.NewMessage([]byte(`a`)),
 		service.NewMessage([]byte(`b`)),
 		service.NewMessage([]byte(`c`)),
 	}
 
-	out := p.assemble(batch, map[int]bool{1: true})
+	out := assemble(batch, map[int]bool{1: true})
 	require.Len(t, out, 1)
 	require.Len(t, out[0], 2)
 
@@ -192,9 +187,78 @@ func TestApplyResultSuccessEmitsMetadata(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]any{"tier": "gold"}, v)
 
-	gen, ok := m.MetaGet("aerospike_generation")
+	gen, ok := m.MetaGet(metaGeneration)
 	require.True(t, ok)
 	assert.Equal(t, "4", gen)
+
+	// The metadata is documented as feeding the output's ttl field, so it has
+	// to be in a form that field accepts.
+	ttl, ok := m.MetaGet(metaTTL)
+	require.True(t, ok)
+	assert.Equal(t, "1m39s", ttl)
+	parsed, err := parseTTL(ttl)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(99), parsed)
+}
+
+// A record that never expires reports a sentinel rather than a duration, which
+// would otherwise reach the user as the meaningless string "4294967295".
+func TestApplyResultNeverExpiringTTLMetadata(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig+"emit_metadata: true\n")
+	m := service.NewMessage([]byte(`{"user_id":"u1"}`))
+
+	rec := &as.BatchRecord{
+		ResultCode: types.OK,
+		Record: &as.Record{
+			Bins:       as.BinMap{"tier": "gold"},
+			Expiration: as.TTLDontExpire,
+		},
+	}
+	require.Equal(t, resultKeep, p.applyResult(m, rec))
+
+	ttl, ok := m.MetaGet(metaTTL)
+	require.True(t, ok)
+	assert.Equal(t, "never", ttl)
+
+	parsed, err := parseTTL(ttl)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(as.TTLDontExpire), parsed)
+}
+
+// Fencing bookkeeping is not part of the record's data. Leaving it in place
+// grafts an internal field onto every enriched message.
+func TestApplyResultStripsFencingBins(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig)
+	m := service.NewMessage([]byte(`{"user_id":"u1"}`))
+
+	rec := &as.BatchRecord{
+		ResultCode: types.OK,
+		Record: &as.Record{
+			Bins: as.BinMap{"tier": "gold", DefaultFenceBin: int64(42)},
+		},
+	}
+	require.Equal(t, resultKeep, p.applyResult(m, rec))
+
+	v, err := m.AsStructured()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"tier": "gold"}, v)
+}
+
+func TestApplyResultKeepsFenceBinWhenCheckDisabled(t *testing.T) {
+	p := newTestProcessor(t, lookupBaseConfig+"fence_bin: ''\n")
+	m := service.NewMessage([]byte(`{"user_id":"u1"}`))
+
+	rec := &as.BatchRecord{
+		ResultCode: types.OK,
+		Record: &as.Record{
+			Bins: as.BinMap{"tier": "gold", DefaultFenceBin: int64(42)},
+		},
+	}
+	require.Equal(t, resultKeep, p.applyResult(m, rec))
+
+	v, err := m.AsStructured()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"tier": "gold", DefaultFenceBin: int64(42)}, v)
 }
 
 func TestParseReadPolicy(t *testing.T) {
