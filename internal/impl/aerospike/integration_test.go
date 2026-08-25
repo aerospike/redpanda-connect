@@ -389,6 +389,128 @@ func TestIntegrationPartialFailure(t *testing.T) {
 	assert.NotNil(t, outputRead(t, client, "p3"))
 }
 
+// firstIndexedError returns the per-message error a batch failure carried, so a
+// test can assert on why a message was nacked rather than only that it was.
+func firstIndexedError(t *testing.T, indexer *service.Indexer, err error) error {
+	t.Helper()
+
+	var batchErr *service.BatchError
+	require.ErrorAs(t, err, &batchErr)
+
+	var found error
+	batchErr.WalkMessagesIndexedBy(indexer, func(_ int, _ *service.Message, e error) bool {
+		if e != nil && found == nil {
+			found = e
+		}
+		return true
+	})
+	require.Error(t, found, "batch error carried no per-message error")
+	return found
+}
+
+func TestIntegrationGenerationCheck(t *testing.T) {
+	w, client := outputSetup(t, "generation: '${! meta(\"gen\") }'\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, `{"id":"g1","v":"first"}`)}))
+	rec := outputRead(t, client, "g1")
+	require.NotNil(t, rec)
+	require.EqualValues(t, 1, rec.Generation)
+
+	// The generation the caller read is still current, so the write lands.
+	current := msg(t, `{"id":"g1","v":"second"}`)
+	current.MetaSet("gen", "1")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{current}))
+	assert.Equal(t, "second", outputRead(t, client, "g1").Bins["v"])
+
+	// The record has moved on since, so that same generation is now stale and
+	// the write must be rejected rather than clobbering the newer value.
+	stale := msg(t, `{"id":"g1","v":"third"}`)
+	stale.MetaSet("gen", "1")
+	staleBatch := service.MessageBatch{stale}
+	indexer := staleBatch.Index()
+
+	err := w.WriteBatch(t.Context(), staleBatch)
+	require.Error(t, err)
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "generation check failed")
+	assert.Equal(t, "second", outputRead(t, client, "g1").Bins["v"])
+}
+
+// A compare-and-set write must keep its check even when another message for the
+// same key rides in the same batch. Coalescing the two would fold away the
+// expected generation and acknowledge a write that silently clobbered whatever
+// changed the record in between.
+func TestIntegrationGenerationSurvivesCoalescing(t *testing.T) {
+	w, client := outputSetup(t, "generation: '${! meta(\"gen\") }'\n")
+
+	// Two unconditional writes, so generation 1 is definitely stale.
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, `{"id":"g2","v":"first"}`)}))
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, `{"id":"g2","v":"second"}`)}))
+	require.EqualValues(t, 2, outputRead(t, client, "g2").Generation)
+
+	stale := msg(t, `{"id":"g2","v":"stale"}`)
+	stale.MetaSet("gen", "1")
+	// No gen metadata, so this one is an ordinary unconditional write.
+	unchecked := msg(t, `{"id":"g2","other":true}`)
+
+	batch := service.MessageBatch{stale, unchecked}
+	indexer := batch.Index()
+
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err, "a stale generation must not be dropped by coalescing")
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "generation check failed")
+
+	var batchErr *service.BatchError
+	require.ErrorAs(t, err, &batchErr)
+	assert.Equal(t, 1, batchErr.IndexedErrors(), "only the compare-and-set message should fail")
+
+	rec := outputRead(t, client, "g2")
+	require.NotNil(t, rec)
+	assert.Equal(t, "second", rec.Bins["v"], "the stale write must not have landed")
+	assert.Equal(t, true, rec.Bins["other"], "the unchecked write must still have landed")
+}
+
+// Keys with no compare-and-set message still coalesce, so the exemption has not
+// quietly disabled batching for everyone.
+func TestIntegrationCoalescingStillFoldsWithoutGeneration(t *testing.T) {
+	w, client := outputSetup(t, "generation: '${! meta(\"gen\") }'\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"g3","a":1}`),
+		msg(t, `{"id":"g3","b":2}`),
+	}))
+
+	rec := outputRead(t, client, "g3")
+	require.NotNil(t, rec)
+	assert.Equal(t, 1, rec.Bins["a"])
+	assert.Equal(t, 2, rec.Bins["b"])
+	// One folded command, so the record was created once rather than updated.
+	assert.EqualValues(t, 1, rec.Generation)
+}
+
+// The warmed connection pool and the error-rate circuit breaker have to work
+// against a real server, not merely parse.
+func TestIntegrationClientPoolTuning(t *testing.T) {
+	w, client := outputSetup(t, `
+max_connections_per_node: 20
+min_connections_per_node: 5
+warm_up: true
+max_error_rate: 10
+error_rate_window: 2
+`)
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, `{"id":"t1","v":"warm"}`)}))
+	assert.Equal(t, "warm", outputRead(t, client, "t1").Bins["v"])
+}
+
+// An unlimited total timeout must leave the socket timeout in place rather than
+// clamping it to zero and removing every bound on the command.
+func TestIntegrationUnlimitedTotalTimeout(t *testing.T) {
+	w, client := outputSetup(t, "total_timeout: 0s\nsocket_timeout: 5s\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, `{"id":"t2","v":"ok"}`)}))
+	assert.Equal(t, "ok", outputRead(t, client, "t2").Bins["v"])
+}
+
 func TestIntegrationLookupEnriches(t *testing.T) {
 	p, client := lookupSetup(t, "")
 
