@@ -28,17 +28,22 @@ jobs:
 
     steps:
 
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - name: Check Out Repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Configure AWS credentials for access to AWS Secrets Manager
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           aws-region: ${{ vars.RP_AWS_CRED_REGION }}
           role-to-assume: arn:aws:iam::${{ secrets.RP_AWS_CRED_ACCOUNT_ID }}:role/${{ vars.RP_AWS_CRED_BASE_ROLE_NAME }}${{ github.event.repository.name }}
 
       - name: Get secrets from AWS Secrets Manager
-        uses: aws-actions/aws-secretsmanager-get-secrets@v3
+        uses: aws-actions/aws-secretsmanager-get-secrets@2cb1a461cbd4865ac4299648312e4704c646cd53 # v3.0.1
         with:
           secret-ids: |
             ,sdlc/prod/github/cloudsmith
@@ -47,18 +52,18 @@ jobs:
           parse-json-secrets: true
 
       - name: Configure AWS credentials for access to Amazon ECR Public
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           aws-region: us-east-1
           role-to-assume: arn:aws:iam::${{ secrets.RP_AWS_CRED_ACCOUNT_ID }}:role/${{ vars.RP_AWS_CRED_BASE_ROLE_NAME }}${{ github.event.repository.name }}
 
       - name: Login to Amazon ECR Public
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
         with:
           registry-type: public
 
       - name: Install Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: 'go.mod'
 
@@ -78,20 +83,20 @@ jobs:
       - name: Release Notes
         run: ./resources/scripts/release_notes.sh > ./release_notes.md
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
 
       - name: Authenticate to GCP
         if: ${{ github.event_name == 'push' }}
-        uses: google-github-actions/auth@v3
+        uses: step-security/google-github-auth@775fc4c80760272ef389c9f9f8d98de7db0c170d # v3.0.2
         with:
           workload_identity_provider: projects/606234194099/locations/global/workloadIdentityPools/rp-cicd/providers/gh-connect
           service_account: gh-connect@devprod-cicd-infra.iam.gserviceaccount.com
 
       - name: Set up gcloud CLI
         if: ${{ github.event_name == 'push' }}
-        uses: google-github-actions/setup-gcloud@v3
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Exclude GCP credentials from git state
         if: ${{ github.event_name == 'push' }}
@@ -101,13 +106,13 @@ jobs:
         run: pip install cloudsmith-cli
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ env.DOCKERHUB_USER }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Setup Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: step-security/setup-buildx-action@a4709e2865773e1792246433e8eb922f9743a875 # v4.2.0
 
       - name: Setup Task
         uses: ./.github/actions/setup-task
@@ -131,7 +136,7 @@ jobs:
 
       - name: GoReleaser Release
         if: ${{ github.event_name == 'push' }}
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           args: release --release-notes=./release_notes.md --timeout 120m --config ./.goreleaser/${{ matrix.variant }}.yaml
         env:
@@ -160,7 +165,7 @@ jobs:
 
       - name: GoReleaser Edge
         if: ${{ github.event_name == 'schedule' }}
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           args: release --timeout 120m --snapshot --skip archive,nfpm --config ./.goreleaser/${{ matrix.variant }}.yaml
         env:
@@ -177,13 +182,13 @@ jobs:
 
       - name: GoReleaser Test
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           args: release --timeout 120m --snapshot --skip publish --config ./.goreleaser/${{ matrix.variant }}.yaml
 
       - name: Scan docker images for vulnerabilities
         if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (matrix.variant == 'connect' || matrix.variant == 'connect-cloud') }}
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@d2a0b60797ff03db6132bd4e2b293f9b37081297 # master
         with:
           image-ref: ${{ fromJSON('{"connect":"redpandadata/connect:edge","connect-ai":"redpandadata/connect:edge-ai","connect-cloud":"redpandadata/connect:edge-cloud"}')[matrix.variant] }}
           format: table
@@ -203,8 +208,13 @@ jobs:
     outputs:
       pr_url: ${{ steps.pr.outputs.url }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: 'go.mod'
       - name: Update bundles and create PR
@@ -247,11 +257,16 @@ jobs:
     outputs:
       helm_pr_url: ${{ steps.helm.outputs.url }}
     steps:
-      - uses: aws-actions/configure-aws-credentials@v6
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           aws-region: ${{ vars.RP_AWS_CRED_REGION }}
           role-to-assume: arn:aws:iam::${{ secrets.RP_AWS_CRED_ACCOUNT_ID }}:role/${{ vars.RP_AWS_CRED_BASE_ROLE_NAME }}${{ github.event.repository.name }}
-      - uses: aws-actions/aws-secretsmanager-get-secrets@v3
+      - uses: aws-actions/aws-secretsmanager-get-secrets@2cb1a461cbd4865ac4299648312e4704c646cd53 # v3.0.1
         with:
           secret-ids: |
             ,sdlc/prod/github/actions_bot_token
@@ -325,6 +340,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - name: Get release info
         id: release
         env:
@@ -417,7 +437,7 @@ jobs:
             }' > "$RUNNER_TEMP/slack_payload.json"
 
       - name: Post changelog to Slack
-        uses: slackapi/slack-github-action@v3.0.1
+        uses: slackapi/slack-github-action@af78098f536edbc4de71162a307590698245be95 # v3.0.1
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook
