@@ -82,13 +82,13 @@ func ClientFields() []*service.ConfigField {
 			Advanced(),
 
 		service.NewIntField(FieldMinConnsPerNode).
-			Description("Number of connections per node to keep open even while idle, so a burst after a quiet period does not pay reconnect cost. This is also how many connections `warm_up` opens. Keep it only as high as the steady-state concurrency needs: every connection is a file descriptor on the node, and with TLS a large pool makes startup and reconnect expensive in server CPU.").
+			Description("Number of connections per node to keep open even while idle, so a burst after a quiet period does not pay reconnect cost. This is also how many connections `warm_up` opens. `0` sizes the pool automatically from the concurrency the component can reach, which is what keeps commands from failing while the pool is still filling. Set it explicitly only to override that: every connection is a file descriptor on the node, and with TLS a large pool makes startup and reconnect expensive in server CPU.").
 			Default(0).
 			LintRule(NonNegativeLint).
 			Advanced(),
 
 		service.NewBoolField(FieldWarmUp).
-			Description("Open `min_connections_per_node` connections on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands. Has no effect when `min_connections_per_node` is `0`.").
+			Description("Open `min_connections_per_node` connections on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands. Disabling this leaves the pool to fill on demand, which with `max_retries` at `0` fails the commands that find it empty.").
 			Default(true).
 			Advanced(),
 
@@ -134,6 +134,24 @@ type ClientConfig struct {
 	Hosts  []*as.Host
 	Policy *as.ClientPolicy
 	WarmUp bool
+}
+
+// SizePoolForConcurrency gives the connection pool a floor matching the number
+// of commands that can be in flight at once, unless the user picked a floor
+// themselves.
+//
+// An empty pool is not a soft condition in the Aerospike client: rather than
+// blocking, it starts a connection in the background and fails the command with
+// NO_AVAILABLE_CONNECTIONS_TO_NODE, expecting a retry to find the new
+// connection. Writes default to max_retries: 0 because create_only and counters
+// cannot be replayed, so there is no retry to absorb that and every command
+// arriving before the pool has filled is lost. Sizing the floor to the
+// concurrency keeps the pool from being empty in the first place.
+func (c *ClientConfig) SizePoolForConcurrency(concurrency int) {
+	if c.Policy.MinConnectionsPerNode > 0 || concurrency <= 0 {
+		return
+	}
+	c.Policy.MinConnectionsPerNode = min(concurrency, c.Policy.ConnectionQueueSize)
 }
 
 // ParseClientConfig reads the fields produced by ClientFields.

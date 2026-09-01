@@ -33,6 +33,10 @@ func newTestWriter(t *testing.T, yaml string) *aerospikeWriter {
 	require.NoError(t, err)
 	parsed, err := parseOutputConfig(conf)
 	require.NoError(t, err)
+	// Mirror newAerospikeOutput, so tests see the pool the pipeline would get.
+	maxInFlight, err := conf.FieldMaxInFlight()
+	require.NoError(t, err)
+	parsed.client.SizePoolForConcurrency(maxInFlight)
 	return &aerospikeWriter{conf: parsed, conn: NewConnection(parsed.client, nil)}
 }
 

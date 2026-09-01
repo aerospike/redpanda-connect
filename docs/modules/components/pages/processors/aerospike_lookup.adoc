@@ -236,7 +236,7 @@ Maximum size of the client connection pool per cluster node. The client opens co
 
 === `min_connections_per_node`
 
-Number of connections per node to keep open even while idle, so a burst after a quiet period does not pay reconnect cost. This is also how many connections `warm_up` opens. Keep it only as high as the steady-state concurrency needs: every connection is a file descriptor on the node, and with TLS a large pool makes startup and reconnect expensive in server CPU.
+Number of connections per node to keep open even while idle, so a burst after a quiet period does not pay reconnect cost. This is also how many connections `warm_up` opens. `0` sizes the pool automatically from the concurrency the component can reach, which is what keeps commands from failing while the pool is still filling. Set it explicitly only to override that: every connection is a file descriptor on the node, and with TLS a large pool makes startup and reconnect expensive in server CPU.
 
 
 *Type*: `int`
@@ -245,7 +245,7 @@ Number of connections per node to keep open even while idle, so a burst after a 
 
 === `warm_up`
 
-Open `min_connections_per_node` connections on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands. Has no effect when `min_connections_per_node` is `0`.
+Open `min_connections_per_node` connections on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands. Disabling this leaves the pool to fill on demand, which with `max_retries` at `0` fails the commands that find it empty.
 
 
 *Type*: `bool`

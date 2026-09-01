@@ -55,6 +55,7 @@ func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (ser
 	if err != nil {
 		return nil, batchPolicy, 0, err
 	}
+	parsed.client.SizePoolForConcurrency(maxInFlight)
 
 	return &aerospikeWriter{
 		conf:        parsed,

@@ -41,6 +41,11 @@ const (
 
 	metaGeneration = "aerospike_generation"
 	metaTTL        = "aerospike_ttl"
+
+	// Matches the framework's default pipeline thread count closely enough to
+	// keep the connection pool ahead of demand without holding descriptors the
+	// pipeline will never use.
+	defaultLookupConcurrency = 16
 )
 
 func init() {
@@ -241,6 +246,11 @@ func newLookupProcessor(conf *service.ParsedConfig, mgr *service.Resources) (ser
 	if err != nil {
 		return nil, err
 	}
+	// A processor has no max_in_flight to read: its concurrency is whatever the
+	// pipeline runs it at. Size for a typical thread count so lookups are not
+	// the first thing to find an empty pool.
+	parsed.client.SizePoolForConcurrency(defaultLookupConcurrency)
+
 	return &lookupProcessor{
 		conf: parsed,
 		conn: NewConnection(parsed.client, mgr.Logger()),

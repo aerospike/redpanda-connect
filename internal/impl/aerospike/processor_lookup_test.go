@@ -31,6 +31,8 @@ func newTestProcessor(t *testing.T, yaml string) *lookupProcessor {
 	require.NoError(t, err)
 	parsed, err := parseLookupConfig(conf)
 	require.NoError(t, err)
+	// Mirror newLookupProcessor, so tests see the pool the pipeline would get.
+	parsed.client.SizePoolForConcurrency(defaultLookupConcurrency)
 	return &lookupProcessor{conf: parsed, conn: NewConnection(parsed.client, nil)}
 }
 
