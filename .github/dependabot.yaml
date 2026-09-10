@@ -14,3 +14,73 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  - package-ecosystem: gomod
+    directory: /benchmarking/aws/cleanup-lambda
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: gomod
+    directory: /benchmarking/aws
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /internal/impl/aws/s3/bench/read/kafka-connect
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /internal/impl/aws/s3/bench/write/kafka-connect
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /internal/impl/iceberg/bench/kafka-connector
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /internal/impl/mysql/bench/mysql-read/debezium
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /internal/impl/mysql/bench/mysql-write/jdbc-sink
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /internal/impl/postgresql/bench/kafka-connector
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: gomod
+    directory: /internal/impl/redpanda/testdata/uppercase
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: gomod
+    directory: /internal/rpcplugin/testdata/catshout
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: gomod
+    directory: /public/bundle/enterprise
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: gomod
+    directory: /public/bundle/free
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /resources/docker
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: /resources/plugin_uploader
+    schedule:
+      interval: weekly
