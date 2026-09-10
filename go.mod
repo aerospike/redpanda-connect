@@ -49,8 +49,6 @@ require (
 	github.com/PaesslerAG/jsonpath v0.1.1
 	github.com/a2aproject/a2a-go v0.3.12
 	github.com/aerospike/aerospike-client-go/v8 v8.8.0
-	github.com/apache/arrow-go/v18 v18.6.0
-	github.com/apache/iceberg-go v0.5.1-0.20260506193454-dfc5851d9367
 	github.com/apache/arrow-go/v18 v18.7.0
 	github.com/apache/iceberg-go v0.6.1-0.20260817231015-4390d2af2bb0
 	github.com/apache/pulsar-client-go v0.18.0
