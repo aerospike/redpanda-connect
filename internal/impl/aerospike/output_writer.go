@@ -55,11 +55,11 @@ func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (ser
 	if err != nil {
 		return nil, batchPolicy, 0, err
 	}
-	parsed.client.SizePoolForConcurrency(maxInFlight)
+	parsed.client.sizePoolForConcurrency(maxInFlight)
 
 	return &aerospikeWriter{
 		conf:        parsed,
-		conn:        NewConnection(parsed.client, mgr.Logger()),
+		conn:        newConnection(parsed.client, mgr.Logger()),
 		log:         mgr.Logger(),
 		filteredOut: mgr.Metrics().NewCounter("aerospike_filtered_out"),
 	}, batchPolicy, maxInFlight, nil
@@ -67,7 +67,7 @@ func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (ser
 
 type aerospikeWriter struct {
 	conf        *aerospikeConfig
-	conn        *Connection
+	conn        *connection
 	log         *service.Logger
 	filteredOut *service.MetricCounter
 
@@ -77,29 +77,29 @@ type aerospikeWriter struct {
 }
 
 func (w *aerospikeWriter) Connect(ctx context.Context) error {
-	return w.conn.Connect(ctx)
+	return w.conn.connect(ctx)
 }
 
 func (w *aerospikeWriter) Close(ctx context.Context) error {
-	return w.conn.Close(ctx)
+	return w.conn.close(ctx)
 }
 
 func (w *aerospikeWriter) ConnectionTest(ctx context.Context) service.ConnectionTestResults {
 	// A connection test should not warm a pool it is about to throw away.
 	probe := *w.conf.client
 	probe.WarmUp = false
-	tmp := NewConnection(&probe, w.log)
-	if err := tmp.Connect(ctx); err != nil {
+	tmp := newConnection(&probe, w.log)
+	if err := tmp.connect(ctx); err != nil {
 		return service.ConnectionTestFailed(err).AsList()
 	}
-	_ = tmp.Close(ctx)
+	_ = tmp.close(ctx)
 	return service.ConnectionTestSucceeded().AsList()
 }
 
 func (w *aerospikeWriter) WriteBatch(ctx context.Context, batch service.MessageBatch) error {
 	operate := w.operate
 	if operate == nil {
-		client := w.conn.Client()
+		client := w.conn.asClient()
 		if client == nil {
 			if w.log != nil {
 				w.log.Error("Not connected to Aerospike")
@@ -122,13 +122,13 @@ func (w *aerospikeWriter) WriteBatch(ctx context.Context, batch service.MessageB
 			records[i] = w.buildRecord(op)
 		}
 
-		policy, err := BatchPolicyForContext(ctx, w.conf.batchPolicy)
+		policy, err := batchPolicyForContext(ctx, w.conf.batchPolicy)
 		if err != nil {
 			return err
 		}
 
 		batchErr := operate(policy, records)
-		if batchErr != nil && IsConnectionError(batchErr) {
+		if batchErr != nil && isConnectionError(batchErr) {
 			if w.log != nil {
 				w.log.Errorf("Aerospike batch command failed: %v", batchErr)
 			}
