@@ -25,16 +25,16 @@ import (
 
 // Configuration field names for Aerospike read and write policies.
 const (
-	FieldCommitLevel = "commit_level"
-	FieldReplica     = "replica"
-	FieldReadModeAP  = "read_mode_ap"
-	FieldReadModeSC  = "read_mode_sc"
+	fieldCommitLevel = "commit_level"
+	fieldReplica     = "replica"
+	fieldReadModeAP  = "read_mode_ap"
+	fieldReadModeSC  = "read_mode_sc"
 )
 
-// CommitLevelField is the write durability choice: wait for replicas, or only
+// commitLevelField is the write durability choice: wait for replicas, or only
 // for the master. Strong-consistency namespaces require `all`.
-func CommitLevelField() *service.ConfigField {
-	return service.NewStringAnnotatedEnumField(FieldCommitLevel, map[string]string{
+func commitLevelField() *service.ConfigField {
+	return service.NewStringAnnotatedEnumField(fieldCommitLevel, map[string]string{
 		"all":    "Wait until the master and all replicas have committed. Required for strong-consistency namespaces.",
 		"master": "Wait only for the master. Faster in AP namespaces when replica lag is acceptable.",
 	}).
@@ -43,10 +43,10 @@ func CommitLevelField() *service.ConfigField {
 		Advanced()
 }
 
-// ReadPolicyFields control which copy of a record a lookup may read.
-func ReadPolicyFields() []*service.ConfigField {
+// readPolicyFields control which copy of a record a lookup may read.
+func readPolicyFields() []*service.ConfigField {
 	return []*service.ConfigField{
-		service.NewStringAnnotatedEnumField(FieldReplica, map[string]string{
+		service.NewStringAnnotatedEnumField(fieldReplica, map[string]string{
 			"sequence":      "Try the master first, then replicas. Client default.",
 			"master":        "Read only from the master partition.",
 			"master_proles": "Spread reads across master and replica copies. Useful for a hot key when slightly stale data is acceptable.",
@@ -57,7 +57,7 @@ func ReadPolicyFields() []*service.ConfigField {
 			Default("sequence").
 			Advanced(),
 
-		service.NewStringAnnotatedEnumField(FieldReadModeAP, map[string]string{
+		service.NewStringAnnotatedEnumField(fieldReadModeAP, map[string]string{
 			"one": "A single replica participates. Default.",
 			"all": "Consult duplicate partitions during migration so stale reads are less likely, at extra cost.",
 		}).
@@ -65,7 +65,7 @@ func ReadPolicyFields() []*service.ConfigField {
 			Default("one").
 			Advanced(),
 
-		service.NewStringAnnotatedEnumField(FieldReadModeSC, map[string]string{
+		service.NewStringAnnotatedEnumField(fieldReadModeSC, map[string]string{
 			"session":           "This client sees a monotonic sequence of versions. Default.",
 			"linearize":         "All clients see a monotonic sequence. Strongest, and the most expensive.",
 			"allow_replica":     "May read from a full replica, not only the master.",
@@ -77,8 +77,8 @@ func ReadPolicyFields() []*service.ConfigField {
 	}
 }
 
-// ParseCommitLevel maps the commit_level config value to an Aerospike commit policy.
-func ParseCommitLevel(s string) (as.CommitLevel, error) {
+// parseCommitLevel maps the commit_level config value to an Aerospike commit policy.
+func parseCommitLevel(s string) (as.CommitLevel, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "all", "":
 		return as.COMMIT_ALL, nil
@@ -89,8 +89,8 @@ func ParseCommitLevel(s string) (as.CommitLevel, error) {
 	}
 }
 
-// ParseReplicaPolicy maps the replica config value to an Aerospike replica policy.
-func ParseReplicaPolicy(s string) (as.ReplicaPolicy, error) {
+// parseReplicaPolicy maps the replica config value to an Aerospike replica policy.
+func parseReplicaPolicy(s string) (as.ReplicaPolicy, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "sequence", "":
 		return as.SEQUENCE, nil
@@ -107,8 +107,8 @@ func ParseReplicaPolicy(s string) (as.ReplicaPolicy, error) {
 	}
 }
 
-// ParseReadModeAP maps the read_mode_ap config value.
-func ParseReadModeAP(s string) (as.ReadModeAP, error) {
+// parseReadModeAP maps the read_mode_ap config value.
+func parseReadModeAP(s string) (as.ReadModeAP, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "one", "":
 		return as.ReadModeAPOne, nil
@@ -119,8 +119,8 @@ func ParseReadModeAP(s string) (as.ReadModeAP, error) {
 	}
 }
 
-// ParseReadModeSC maps the read_mode_sc config value.
-func ParseReadModeSC(s string) (as.ReadModeSC, error) {
+// parseReadModeSC maps the read_mode_sc config value.
+func parseReadModeSC(s string) (as.ReadModeSC, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "session", "":
 		return as.ReadModeSCSession, nil
@@ -135,30 +135,30 @@ func ParseReadModeSC(s string) (as.ReadModeSC, error) {
 	}
 }
 
-// ApplyReadPolicy overlays replica and AP/SC read-mode fields onto a batch policy.
-func ApplyReadPolicy(conf *service.ParsedConfig, p *as.BatchPolicy) error {
-	replica, err := conf.FieldString(FieldReplica)
+// applyReadPolicy overlays replica and AP/SC read-mode fields onto a batch policy.
+func applyReadPolicy(conf *service.ParsedConfig, p *as.BatchPolicy) error {
+	replica, err := conf.FieldString(fieldReplica)
 	if err != nil {
 		return err
 	}
-	if p.ReplicaPolicy, err = ParseReplicaPolicy(replica); err != nil {
-		return fmt.Errorf("field '%v': %w", FieldReplica, err)
+	if p.ReplicaPolicy, err = parseReplicaPolicy(replica); err != nil {
+		return fmt.Errorf("field '%v': %w", fieldReplica, err)
 	}
 
-	ap, err := conf.FieldString(FieldReadModeAP)
+	ap, err := conf.FieldString(fieldReadModeAP)
 	if err != nil {
 		return err
 	}
-	if p.ReadModeAP, err = ParseReadModeAP(ap); err != nil {
-		return fmt.Errorf("field '%v': %w", FieldReadModeAP, err)
+	if p.ReadModeAP, err = parseReadModeAP(ap); err != nil {
+		return fmt.Errorf("field '%v': %w", fieldReadModeAP, err)
 	}
 
-	sc, err := conf.FieldString(FieldReadModeSC)
+	sc, err := conf.FieldString(fieldReadModeSC)
 	if err != nil {
 		return err
 	}
-	if p.ReadModeSC, err = ParseReadModeSC(sc); err != nil {
-		return fmt.Errorf("field '%v': %w", FieldReadModeSC, err)
+	if p.ReadModeSC, err = parseReadModeSC(sc); err != nil {
+		return fmt.Errorf("field '%v': %w", fieldReadModeSC, err)
 	}
 	return nil
 }

@@ -21,10 +21,10 @@ import (
 	as "github.com/aerospike/aerospike-client-go/v8"
 )
 
-// LimitDuration returns the shorter of the configured timeout and the time
+// limitDuration returns the shorter of the configured timeout and the time
 // remaining on ctx. The Aerospike client takes no context, so a command's
 // TotalTimeout is the only way to honour a pipeline deadline.
-func LimitDuration(ctx context.Context, configured time.Duration) (time.Duration, error) {
+func limitDuration(ctx context.Context, configured time.Duration) (time.Duration, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -45,15 +45,15 @@ func LimitDuration(ctx context.Context, configured time.Duration) (time.Duration
 	return remaining, nil
 }
 
-// BatchPolicyForContext copies p and caps TotalTimeout (and SocketTimeout)
+// batchPolicyForContext copies p and caps TotalTimeout (and SocketTimeout)
 // so a BatchOperate cannot outlive ctx. The original policy is left unchanged
 // so concurrent batches do not race.
-func BatchPolicyForContext(ctx context.Context, p *as.BatchPolicy) (*as.BatchPolicy, error) {
+func batchPolicyForContext(ctx context.Context, p *as.BatchPolicy) (*as.BatchPolicy, error) {
 	if p == nil {
 		p = as.NewBatchPolicy()
 	}
 	cp := *p
-	total, err := LimitDuration(ctx, cp.TotalTimeout)
+	total, err := limitDuration(ctx, cp.TotalTimeout)
 	if err != nil {
 		return nil, err
 	}

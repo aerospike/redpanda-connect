@@ -29,36 +29,36 @@ import (
 
 // Configuration field names that address an Aerospike record.
 const (
-	FieldNamespace   = "namespace"
-	FieldSet         = "set"
-	FieldKey         = "key"
-	FieldKeyType     = "key_type"
-	FieldKeyEncoding = "key_encoding"
+	fieldNamespace   = "namespace"
+	fieldSet         = "set"
+	fieldKey         = "key"
+	fieldKeyType     = "key_type"
+	fieldKeyEncoding = "key_encoding"
 
-	// MaxSetNameLen is the server limit on set names. Sets are also capped per
+	// maxSetNameLen is the server limit on set names. Sets are also capped per
 	// namespace (1024 on older servers, 32767 on 7+) and cannot be dropped
 	// except by truncating, so interpolating an unbounded value is costly.
-	MaxSetNameLen = 63
+	maxSetNameLen = 63
 
-	// MaxNamespaceNameLen is the server limit on namespace names.
-	MaxNamespaceNameLen = 31
+	// maxNamespaceNameLen is the server limit on namespace names.
+	maxNamespaceNameLen = 31
 )
 
-// KeyFields returns the fields that address an Aerospike record.
-func KeyFields(keyExamples ...string) []*service.ConfigField {
-	keyField := service.NewInterpolatedStringField(FieldKey).
+// keyFields returns the fields that address an Aerospike record.
+func keyFields(keyExamples ...string) []*service.ConfigField {
+	keyField := service.NewInterpolatedStringField(fieldKey).
 		Description("The record primary key.")
 	for _, ex := range keyExamples {
 		keyField = keyField.Example(ex)
 	}
 
 	return []*service.ConfigField{
-		service.NewInterpolatedStringField(FieldNamespace).
+		service.NewInterpolatedStringField(fieldNamespace).
 			Description("The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime.").
 			Example("test").
 			Example(`${! meta("as_namespace") }`),
 
-		service.NewInterpolatedStringField(FieldSet).
+		service.NewInterpolatedStringField(fieldSet).
 			Description("The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value such as a Kafka topic name. Leave empty for the null set.").
 			Default("").
 			Example("users").
@@ -66,19 +66,19 @@ func KeyFields(keyExamples ...string) []*service.ConfigField {
 
 		keyField,
 
-		service.NewStringEnumField(FieldKeyType, "string", "int", "bytes").
+		service.NewStringEnumField(fieldKeyType, "string", "int", "bytes").
 			Description("How to interpret the resolved `key`. Aerospike addresses records by a digest of the key, and the digest differs between a string `\"123\"` and an integer `123` — so this must match whatever else reads or writes these records.").
 			Default("string"),
 
-		service.NewStringEnumField(FieldKeyEncoding, "utf8", "base64", "hex").
+		service.NewStringEnumField(fieldKeyEncoding, "utf8", "base64", "hex").
 			Description("How to decode the interpolated `key` when `key_type` is `bytes`. Interpolation always yields a string, so a genuine binary key must be carried as base64 or hex. `utf8` uses the string's raw bytes and only matches other clients that also stored UTF-8.").
 			Default("utf8").
 			Advanced(),
 	}
 }
 
-// KeyConfig is the parsed record addressing configuration.
-type KeyConfig struct {
+// keyConfig is the parsed record addressing configuration.
+type keyConfig struct {
 	Namespace   *service.InterpolatedString
 	Set         *service.InterpolatedString
 	Key         *service.InterpolatedString
@@ -86,35 +86,35 @@ type KeyConfig struct {
 	KeyEncoding string
 }
 
-// ParseKeyConfig reads the fields produced by KeyFields.
-func ParseKeyConfig(conf *service.ParsedConfig) (*KeyConfig, error) {
-	k := &KeyConfig{}
+// parseKeyConfig reads the fields produced by keyFields.
+func parseKeyConfig(conf *service.ParsedConfig) (*keyConfig, error) {
+	k := &keyConfig{}
 
 	var err error
-	if k.Namespace, err = conf.FieldInterpolatedString(FieldNamespace); err != nil {
+	if k.Namespace, err = conf.FieldInterpolatedString(fieldNamespace); err != nil {
 		return nil, err
 	}
-	if k.Set, err = conf.FieldInterpolatedString(FieldSet); err != nil {
+	if k.Set, err = conf.FieldInterpolatedString(fieldSet); err != nil {
 		return nil, err
 	}
-	if k.Key, err = conf.FieldInterpolatedString(FieldKey); err != nil {
+	if k.Key, err = conf.FieldInterpolatedString(fieldKey); err != nil {
 		return nil, err
 	}
-	if k.KeyType, err = conf.FieldString(FieldKeyType); err != nil {
+	if k.KeyType, err = conf.FieldString(fieldKeyType); err != nil {
 		return nil, err
 	}
-	if k.KeyEncoding, err = conf.FieldString(FieldKeyEncoding); err != nil {
+	if k.KeyEncoding, err = conf.FieldString(fieldKeyEncoding); err != nil {
 		return nil, err
 	}
 	return k, nil
 }
 
-// KeyResolver resolves record keys for one batch.
+// keyResolver resolves record keys for one batch.
 //
 // Interpolation is bound to the batch rather than to individual messages so
 // that batch-aware functions such as `batch_index()` and windowed Bloblang
 // queries behave as they do everywhere else in Redpanda Connect.
-type KeyResolver struct {
+type keyResolver struct {
 	namespace   *service.MessageBatchInterpolationExecutor
 	set         *service.MessageBatchInterpolationExecutor
 	key         *service.MessageBatchInterpolationExecutor
@@ -122,9 +122,9 @@ type KeyResolver struct {
 	keyEncoding string
 }
 
-// Resolver binds key interpolation to a batch so batch-aware Bloblang works.
-func (k *KeyConfig) Resolver(batch service.MessageBatch) *KeyResolver {
-	return &KeyResolver{
+// resolver binds key interpolation to a batch so batch-aware Bloblang works.
+func (k *keyConfig) resolver(batch service.MessageBatch) *keyResolver {
+	return &keyResolver{
 		namespace:   batch.InterpolationExecutor(k.Namespace),
 		set:         batch.InterpolationExecutor(k.Set),
 		key:         batch.InterpolationExecutor(k.Key),
@@ -133,27 +133,27 @@ func (k *KeyConfig) Resolver(batch service.MessageBatch) *KeyResolver {
 	}
 }
 
-// Key builds the Aerospike key for the message at the given batch index.
-func (r *KeyResolver) Key(index int) (*as.Key, error) {
+// resolve builds the Aerospike key for the message at the given batch index.
+func (r *keyResolver) resolve(index int) (*as.Key, error) {
 	namespace, err := r.namespace.TryString(index)
 	if err != nil {
-		return nil, fmt.Errorf("interpolating '%v': %w", FieldNamespace, err)
+		return nil, fmt.Errorf("interpolating '%v': %w", fieldNamespace, err)
 	}
-	if err := ValidateNamespaceName(namespace); err != nil {
-		return nil, fmt.Errorf("field '%v': %w", FieldNamespace, err)
+	if err := validateNamespaceName(namespace); err != nil {
+		return nil, fmt.Errorf("field '%v': %w", fieldNamespace, err)
 	}
 
 	setName, err := r.set.TryString(index)
 	if err != nil {
-		return nil, fmt.Errorf("interpolating '%v': %w", FieldSet, err)
+		return nil, fmt.Errorf("interpolating '%v': %w", fieldSet, err)
 	}
-	if err := ValidateSetName(setName); err != nil {
-		return nil, fmt.Errorf("field '%v': %w", FieldSet, err)
+	if err := validateSetName(setName); err != nil {
+		return nil, fmt.Errorf("field '%v': %w", fieldSet, err)
 	}
 
 	keyStr, err := r.key.TryString(index)
 	if err != nil {
-		return nil, fmt.Errorf("interpolating '%v': %w", FieldKey, err)
+		return nil, fmt.Errorf("interpolating '%v': %w", fieldKey, err)
 	}
 	// An interpolation over a missing field yields the literal "null" rather
 	// than an error. Left alone, every message with an absent key would address
@@ -161,7 +161,7 @@ func (r *KeyResolver) Key(index int) (*as.Key, error) {
 	if keyStr == "" || keyStr == "null" {
 		return nil, fmt.Errorf(
 			"field '%v' resolved to %q, which is not a usable record key; the source field is probably missing from this message",
-			FieldKey, keyStr)
+			fieldKey, keyStr)
 	}
 
 	keyVal, err := coerceKey(keyStr, r.keyType, r.keyEncoding)
@@ -180,18 +180,18 @@ func coerceKey(s, keyType, encoding string) (any, error) {
 	switch keyType {
 	case "int":
 		if encoding != "" && encoding != "utf8" {
-			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is bytes", FieldKeyEncoding, encoding, FieldKeyType)
+			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is bytes", fieldKeyEncoding, encoding, fieldKeyType)
 		}
 		v, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("field '%v' resolved to %q, which is not an integer as required by '%v': %w", FieldKey, s, FieldKeyType, err)
+			return nil, fmt.Errorf("field '%v' resolved to %q, which is not an integer as required by '%v': %w", fieldKey, s, fieldKeyType, err)
 		}
 		return v, nil
 	case "bytes":
 		return decodeBytesKey(s, encoding)
 	default:
 		if encoding != "" && encoding != "utf8" {
-			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is bytes", FieldKeyEncoding, encoding, FieldKeyType)
+			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is bytes", fieldKeyEncoding, encoding, fieldKeyType)
 		}
 		return s, nil
 	}
@@ -204,40 +204,40 @@ func decodeBytesKey(s, encoding string) (any, error) {
 	case "base64":
 		b, err := base64.StdEncoding.DecodeString(s)
 		if err != nil {
-			return nil, fmt.Errorf("field '%v' resolved to %q, which is not valid base64: %w", FieldKey, s, err)
+			return nil, fmt.Errorf("field '%v' resolved to %q, which is not valid base64: %w", fieldKey, s, err)
 		}
 		return b, nil
 	case "hex":
 		b, err := hex.DecodeString(s)
 		if err != nil {
-			return nil, fmt.Errorf("field '%v' resolved to %q, which is not valid hex: %w", FieldKey, s, err)
+			return nil, fmt.Errorf("field '%v' resolved to %q, which is not valid hex: %w", fieldKey, s, err)
 		}
 		return b, nil
 	default:
-		return nil, fmt.Errorf("field '%v': unknown encoding %q", FieldKeyEncoding, encoding)
+		return nil, fmt.Errorf("field '%v': unknown encoding %q", fieldKeyEncoding, encoding)
 	}
 }
 
-// ValidateNamespaceName checks a resolved namespace against the server's
+// validateNamespaceName checks a resolved namespace against the server's
 // limits. An over-long name is rejected by the server as INVALID_NAMESPACE,
 // which reads like a missing namespace rather than a malformed one.
-func ValidateNamespaceName(name string) error {
+func validateNamespaceName(name string) error {
 	if name == "" {
 		return errors.New("resolved to an empty string")
 	}
-	if len(name) > MaxNamespaceNameLen {
-		return fmt.Errorf("namespace %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), MaxNamespaceNameLen)
+	if len(name) > maxNamespaceNameLen {
+		return fmt.Errorf("namespace %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), maxNamespaceNameLen)
 	}
 	return nil
 }
 
-// ValidateSetName checks a resolved set name against the server's limits.
-func ValidateSetName(name string) error {
+// validateSetName checks a resolved set name against the server's limits.
+func validateSetName(name string) error {
 	if name == "" {
 		return nil
 	}
-	if len(name) > MaxSetNameLen {
-		return fmt.Errorf("set name %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), MaxSetNameLen)
+	if len(name) > maxSetNameLen {
+		return fmt.Errorf("set name %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), maxSetNameLen)
 	}
 	if strings.Contains(name, ":") {
 		return fmt.Errorf("set name %q contains a colon, which Aerospike does not allow", name)
@@ -245,9 +245,9 @@ func ValidateSetName(name string) error {
 	return nil
 }
 
-// KeyID identifies a record for deduplication. The digest is what the server
+// keyID identifies a record for deduplication. The digest is what the server
 // addresses records by, so two user keys with the same digest are one record.
-func KeyID(k *as.Key) string {
+func keyID(k *as.Key) string {
 	var b strings.Builder
 	b.WriteString(k.Namespace())
 	b.WriteByte(0)

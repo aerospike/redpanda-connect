@@ -31,84 +31,84 @@ import (
 
 // Configuration field names shared by every Aerospike component.
 const (
-	FieldHosts                = "hosts"
-	FieldClusterName          = "cluster_name"
-	FieldUseServicesAlternate = "use_services_alternate"
-	FieldConnectTimeout       = "connect_timeout"
-	FieldMaxConnsPerNode      = "max_connections_per_node"
-	FieldMinConnsPerNode      = "min_connections_per_node"
-	FieldWarmUp               = "warm_up"
-	FieldMaxErrorRate         = "max_error_rate"
-	FieldErrorRateWindow      = "error_rate_window"
-	FieldCredentials          = "credentials"
-	FieldCredentialsUsername  = "username"
-	FieldCredentialsPassword  = "password"
-	FieldTLS                  = "tls"
-	FieldAuthMode             = "auth_mode"
+	fieldHosts                = "hosts"
+	fieldClusterName          = "cluster_name"
+	fieldUseServicesAlternate = "use_services_alternate"
+	fieldConnectTimeout       = "connect_timeout"
+	fieldMaxConnsPerNode      = "max_connections_per_node"
+	fieldMinConnsPerNode      = "min_connections_per_node"
+	fieldWarmUp               = "warm_up"
+	fieldMaxErrorRate         = "max_error_rate"
+	fieldErrorRateWindow      = "error_rate_window"
+	fieldCredentials          = "credentials"
+	fieldCredentialsUsername  = "username"
+	fieldCredentialsPassword  = "password"
+	fieldTLS                  = "tls"
+	fieldAuthMode             = "auth_mode"
 
 	// defaultServicePort is the Aerospike client service port.
 	defaultServicePort = 3000
 )
 
-// ClientFields returns the connection configuration fields common to every
+// clientFields returns the connection configuration fields common to every
 // Aerospike component.
-func ClientFields() []*service.ConfigField {
+func clientFields() []*service.ConfigField {
 	return []*service.ConfigField{
-		service.NewStringListField(FieldHosts).
+		service.NewStringListField(fieldHosts).
 			Description("Seed nodes as `host`, `host:port`, `host:tlsname:port`, or `[ipv6]:tlsname:port`. Port defaults to 3000. The tlsname is the certificate name used for TLS verification and is required against a conventionally secured cluster. The client discovers and connects directly to every node, so all nodes must be reachable from this process — a load balancer in front of the seeds is not sufficient.").
 			Example([]string{"localhost:3000"}).
 			Example([]string{"as1.internal:clusterA:3000"}).
 			Example([]string{"as1.internal:3000", "as2.internal:3000"}),
 
-		service.NewStringField(FieldClusterName).
+		service.NewStringField(fieldClusterName).
 			Description("Expected cluster name. When set, the client refuses to talk to nodes reporting a different name.").
 			Default("").
 			Advanced(),
 
-		service.NewBoolField(FieldUseServicesAlternate).
+		service.NewBoolField(fieldUseServicesAlternate).
 			Description("Use the nodes' `alternate-access-address` instead of `access-address`. Required when this process reaches Aerospike over a different network than the one the nodes advertise, which is the usual case for Kubernetes and NAT deployments.").
 			Default(false).
 			Advanced(),
 
-		service.NewDurationField(FieldConnectTimeout).
+		service.NewDurationField(fieldConnectTimeout).
 			Description("Timeout for establishing the initial cluster connection. Capped by the remaining pipeline context deadline when one is set, so a shutdown mid-connect does not wait the full duration.").
 			Default("30s").
 			Advanced(),
 
-		service.NewIntField(FieldMaxConnsPerNode).
+		service.NewIntField(fieldMaxConnsPerNode).
 			Description("Maximum size of the client connection pool per cluster node. The client opens connections to every node, so budget `max_connections_per_node` multiplied by the number of processes against the server's `proto-fd-max`.").
 			Default(100).
-			LintRule(PositiveLint).
+			LintRule(positiveLint).
 			Advanced(),
 
-		service.NewIntField(FieldMinConnsPerNode).
+		service.NewIntField(fieldMinConnsPerNode).
 			Description("Number of connections per node to keep open even while idle, so a burst after a quiet period does not pay reconnect cost. This is also how many connections `warm_up` opens. `0` sizes the pool automatically from the concurrency the component can reach, which is what keeps commands from failing while the pool is still filling. Set it explicitly only to override that: every connection is a file descriptor on the node, and with TLS a large pool makes startup and reconnect expensive in server CPU.").
 			Default(0).
-			LintRule(NonNegativeLint).
+			LintRule(nonNegativeLint).
 			Advanced(),
 
-		service.NewBoolField(FieldWarmUp).
+		service.NewBoolField(fieldWarmUp).
 			Description("Open `min_connections_per_node` connections on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands. Disabling this leaves the pool to fill on demand, which with `max_retries` at `0` fails the commands that find it empty.").
 			Default(true).
 			Advanced(),
 
-		service.NewIntField(FieldMaxErrorRate).
+		service.NewIntField(fieldMaxErrorRate).
 			Description("Errors permitted from a single node per `error_rate_window` before the client stops sending it commands and fails fast instead. This is a circuit breaker: it stops a pipeline from hammering a node that is already failing. `0` disables it.").
 			Default(100).
-			LintRule(NonNegativeLint).
+			LintRule(nonNegativeLint).
 			Advanced(),
 
-		service.NewIntField(FieldErrorRateWindow).
+		service.NewIntField(fieldErrorRateWindow).
 			Description("Number of cluster tend iterations that make up the window for `max_error_rate`.").
 			Default(1).
-			LintRule(NonNegativeLint).
+			LintRule(nonNegativeLint).
 			Advanced(),
 
-		service.NewObjectField(FieldCredentials,
-			service.NewStringField(FieldCredentialsUsername).
+		service.NewObjectField(fieldCredentials,
+			service.NewStringField(fieldCredentialsUsername).
 				Description("Username for Aerospike access control.").
 				Default(""),
-			service.NewStringField(FieldCredentialsPassword).
+			service.NewStringField(fieldCredentialsPassword).
 				Description("Password for Aerospike access control.").
 				Default("").
 				Secret(),
@@ -116,7 +116,7 @@ func ClientFields() []*service.ConfigField {
 			Optional().
 			Advanced(),
 
-		service.NewStringAnnotatedEnumField(FieldAuthMode, map[string]string{
+		service.NewStringAnnotatedEnumField(fieldAuthMode, map[string]string{
 			"internal": "Hashed password stored on the server. Default.",
 			"external": "External authentication such as LDAP. Requires TLS.",
 			"pki":      "Certificate authentication. Requires TLS and a client certificate; do not set a password.",
@@ -125,18 +125,18 @@ func ClientFields() []*service.ConfigField {
 			Default("internal").
 			Advanced(),
 
-		service.NewTLSToggledField(FieldTLS),
+		service.NewTLSToggledField(fieldTLS),
 	}
 }
 
-// ClientConfig is the parsed connection configuration.
-type ClientConfig struct {
+// clientConfig is the parsed connection configuration.
+type clientConfig struct {
 	Hosts  []*as.Host
 	Policy *as.ClientPolicy
 	WarmUp bool
 }
 
-// SizePoolForConcurrency gives the connection pool a floor matching the number
+// sizePoolForConcurrency gives the connection pool a floor matching the number
 // of commands that can be in flight at once, unless the user picked a floor
 // themselves.
 //
@@ -147,85 +147,85 @@ type ClientConfig struct {
 // cannot be replayed, so there is no retry to absorb that and every command
 // arriving before the pool has filled is lost. Sizing the floor to the
 // concurrency keeps the pool from being empty in the first place.
-func (c *ClientConfig) SizePoolForConcurrency(concurrency int) {
+func (c *clientConfig) sizePoolForConcurrency(concurrency int) {
 	if c.Policy.MinConnectionsPerNode > 0 || concurrency <= 0 {
 		return
 	}
 	c.Policy.MinConnectionsPerNode = min(concurrency, c.Policy.ConnectionQueueSize)
 }
 
-// ParseClientConfig reads the fields produced by ClientFields.
-func ParseClientConfig(conf *service.ParsedConfig) (*ClientConfig, error) {
-	hostStrs, err := conf.FieldStringList(FieldHosts)
+// parseClientConfig reads the fields produced by clientFields.
+func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
+	hostStrs, err := conf.FieldStringList(fieldHosts)
 	if err != nil {
 		return nil, err
 	}
 	if len(hostStrs) == 0 {
-		return nil, fmt.Errorf("field '%v' must contain at least one seed node", FieldHosts)
+		return nil, fmt.Errorf("field '%v' must contain at least one seed node", fieldHosts)
 	}
 
-	c := &ClientConfig{Policy: as.NewClientPolicy()}
+	c := &clientConfig{Policy: as.NewClientPolicy()}
 	for _, h := range hostStrs {
-		host, err := ParseHost(h)
+		host, err := parseHost(h)
 		if err != nil {
 			return nil, err
 		}
 		c.Hosts = append(c.Hosts, host)
 	}
 
-	if c.Policy.ClusterName, err = conf.FieldString(FieldClusterName); err != nil {
+	if c.Policy.ClusterName, err = conf.FieldString(fieldClusterName); err != nil {
 		return nil, err
 	}
-	if c.Policy.UseServicesAlternate, err = conf.FieldBool(FieldUseServicesAlternate); err != nil {
+	if c.Policy.UseServicesAlternate, err = conf.FieldBool(fieldUseServicesAlternate); err != nil {
 		return nil, err
 	}
-	if c.Policy.Timeout, err = conf.FieldDuration(FieldConnectTimeout); err != nil {
+	if c.Policy.Timeout, err = conf.FieldDuration(fieldConnectTimeout); err != nil {
 		return nil, err
 	}
-	if c.Policy.ConnectionQueueSize, err = conf.FieldInt(FieldMaxConnsPerNode); err != nil {
+	if c.Policy.ConnectionQueueSize, err = conf.FieldInt(fieldMaxConnsPerNode); err != nil {
 		return nil, err
 	}
 	if c.Policy.ConnectionQueueSize < 1 {
-		return nil, fmt.Errorf("field '%v' must be at least 1", FieldMaxConnsPerNode)
+		return nil, fmt.Errorf("field '%v' must be at least 1", fieldMaxConnsPerNode)
 	}
-	if c.Policy.MinConnectionsPerNode, err = conf.FieldInt(FieldMinConnsPerNode); err != nil {
+	if c.Policy.MinConnectionsPerNode, err = conf.FieldInt(fieldMinConnsPerNode); err != nil {
 		return nil, err
 	}
 	if c.Policy.MinConnectionsPerNode < 0 {
-		return nil, fmt.Errorf("field '%v' must not be negative", FieldMinConnsPerNode)
+		return nil, fmt.Errorf("field '%v' must not be negative", fieldMinConnsPerNode)
 	}
 	if c.Policy.MinConnectionsPerNode > c.Policy.ConnectionQueueSize {
 		return nil, fmt.Errorf("field '%v' (%d) must not exceed '%v' (%d)",
-			FieldMinConnsPerNode, c.Policy.MinConnectionsPerNode,
-			FieldMaxConnsPerNode, c.Policy.ConnectionQueueSize)
+			fieldMinConnsPerNode, c.Policy.MinConnectionsPerNode,
+			fieldMaxConnsPerNode, c.Policy.ConnectionQueueSize)
 	}
-	if c.WarmUp, err = conf.FieldBool(FieldWarmUp); err != nil {
+	if c.WarmUp, err = conf.FieldBool(fieldWarmUp); err != nil {
 		return nil, err
 	}
-	if c.Policy.MaxErrorRate, err = conf.FieldInt(FieldMaxErrorRate); err != nil {
+	if c.Policy.MaxErrorRate, err = conf.FieldInt(fieldMaxErrorRate); err != nil {
 		return nil, err
 	}
 	if c.Policy.MaxErrorRate < 0 {
-		return nil, fmt.Errorf("field '%v' must not be negative", FieldMaxErrorRate)
+		return nil, fmt.Errorf("field '%v' must not be negative", fieldMaxErrorRate)
 	}
-	if c.Policy.ErrorRateWindow, err = conf.FieldInt(FieldErrorRateWindow); err != nil {
+	if c.Policy.ErrorRateWindow, err = conf.FieldInt(fieldErrorRateWindow); err != nil {
 		return nil, err
 	}
 	if c.Policy.ErrorRateWindow < 0 {
-		return nil, fmt.Errorf("field '%v' must not be negative", FieldErrorRateWindow)
+		return nil, fmt.Errorf("field '%v' must not be negative", fieldErrorRateWindow)
 	}
 
-	if conf.Contains(FieldCredentials) {
-		cc := conf.Namespace(FieldCredentials)
-		if c.Policy.User, err = cc.FieldString(FieldCredentialsUsername); err != nil {
+	if conf.Contains(fieldCredentials) {
+		cc := conf.Namespace(fieldCredentials)
+		if c.Policy.User, err = cc.FieldString(fieldCredentialsUsername); err != nil {
 			return nil, err
 		}
-		if c.Policy.Password, err = cc.FieldString(FieldCredentialsPassword); err != nil {
+		if c.Policy.Password, err = cc.FieldString(fieldCredentialsPassword); err != nil {
 			return nil, err
 		}
 	}
 
-	mode, err := conf.FieldString(FieldAuthMode)
+	mode, err := conf.FieldString(fieldAuthMode)
 	if err != nil {
 		return nil, err
 	}
@@ -237,12 +237,12 @@ func ParseClientConfig(conf *service.ParsedConfig) (*ClientConfig, error) {
 	case "pki":
 		c.Policy.AuthMode = as.AuthModePKI
 	default:
-		return nil, fmt.Errorf("field '%v': unknown auth mode %q", FieldAuthMode, mode)
+		return nil, fmt.Errorf("field '%v': unknown auth mode %q", fieldAuthMode, mode)
 	}
 
 	var tlsConf *tls.Config
 	var tlsEnabled bool
-	if tlsConf, tlsEnabled, err = conf.FieldTLSToggled(FieldTLS); err != nil {
+	if tlsConf, tlsEnabled, err = conf.FieldTLSToggled(fieldTLS); err != nil {
 		return nil, err
 	}
 	if tlsEnabled {
@@ -252,7 +252,7 @@ func ParseClientConfig(conf *service.ParsedConfig) (*ClientConfig, error) {
 	return c, nil
 }
 
-// ParseHost accepts Aerospike seed addresses:
+// parseHost accepts Aerospike seed addresses:
 //
 //	host
 //	host:port
@@ -262,10 +262,10 @@ func ParseClientConfig(conf *service.ParsedConfig) (*ClientConfig, error) {
 // IPv6 literals must be bracketed when a port or tlsname is present (`[::1]:3000`,
 // `[2001:db8::1]:clusterA:3000`). A bare IPv6 address (`::1`) is a host with the
 // default port. The tlsname is the certificate name used for TLS verification.
-func ParseHost(s string) (*as.Host, error) {
+func parseHost(s string) (*as.Host, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return nil, fmt.Errorf("empty host entry in '%v'", FieldHosts)
+		return nil, fmt.Errorf("empty host entry in '%v'", fieldHosts)
 	}
 
 	name, rest, err := splitHostName(s)
@@ -378,25 +378,26 @@ func parsePort(orig, s string) (int, bool, error) {
 	return p, true, nil
 }
 
-// Connection owns a single Aerospike client for the lifetime of a component.
+// connection owns a single Aerospike client for the lifetime of a component.
 //
 // The client is thread safe and holds the cluster state and connection pools,
 // so one per component is correct; creating one per request would exhaust
 // ports and add a cluster tend to every operation.
-type Connection struct {
-	conf *ClientConfig
+type connection struct {
+	conf *clientConfig
 	log  *service.Logger
 
 	mu     sync.RWMutex
 	client *as.Client
 }
 
-// NewConnection returns an unconnected handle. Call Connect before issuing commands.
-func NewConnection(conf *ClientConfig, log *service.Logger) *Connection {
-	return &Connection{conf: conf, log: log}
+// newConnection returns an unconnected handle. Call connect before issuing commands.
+func newConnection(conf *clientConfig, log *service.Logger) *connection {
+	return &connection{conf: conf, log: log}
 }
 
-func (c *Connection) Connect(ctx context.Context) error {
+// connect establishes the cluster client, or reuses it if it is already live.
+func (c *connection) connect(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -417,7 +418,7 @@ func (c *Connection) Connect(ctx context.Context) error {
 		policy = as.NewClientPolicy()
 	}
 	p := *policy
-	timeout, err := LimitDuration(ctx, p.Timeout)
+	timeout, err := limitDuration(ctx, p.Timeout)
 	if err != nil {
 		return err
 	}
@@ -467,7 +468,9 @@ func (c *Connection) Connect(ctx context.Context) error {
 	}
 }
 
-func (c *Connection) Close(ctx context.Context) error {
+// close releases the cluster client. A cancelled ctx may return before the
+// client is fully shut down; it is still closed in the background.
+func (c *connection) close(ctx context.Context) error {
 	c.mu.Lock()
 	client := c.client
 	c.client = nil
@@ -489,8 +492,8 @@ func (c *Connection) Close(ctx context.Context) error {
 	}
 }
 
-// Client returns the live client, or nil when the component is not connected.
-func (c *Connection) Client() *as.Client {
+// asClient returns the live client, or nil when the component is not connected.
+func (c *connection) asClient() *as.Client {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.client == nil || !c.client.IsConnected() {

@@ -51,7 +51,7 @@ func TestToAerospike(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ToAerospike(tc.in, tc.coerce)
+			got, err := toAerospike(tc.in, tc.coerce)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
@@ -59,7 +59,7 @@ func TestToAerospike(t *testing.T) {
 }
 
 func TestToAerospikeNested(t *testing.T) {
-	got, err := ToAerospike(map[string]any{
+	got, err := toAerospike(map[string]any{
 		"count": float64(3),
 		"ratio": 0.5,
 		"tags":  []any{"a", float64(1)},
@@ -87,7 +87,7 @@ func TestFromAerospikeMapKeys(t *testing.T) {
 		},
 	}
 
-	got := FromAerospike(in)
+	got := fromAerospike(in)
 
 	want := map[string]any{
 		"name": "Ada",
@@ -100,39 +100,39 @@ func TestFromAerospikeMapKeys(t *testing.T) {
 }
 
 func TestFromAerospikePassthrough(t *testing.T) {
-	assert.Equal(t, "x", FromAerospike("x"))
-	assert.Equal(t, 5, FromAerospike(5))
-	assert.Nil(t, FromAerospike(nil))
-	assert.Equal(t, []any{int64(1), "a"}, FromAerospike([]any{int64(1), "a"}))
+	assert.Equal(t, "x", fromAerospike("x"))
+	assert.Equal(t, 5, fromAerospike(5))
+	assert.Nil(t, fromAerospike(nil))
+	assert.Equal(t, []any{int64(1), "a"}, fromAerospike([]any{int64(1), "a"}))
 }
 
 func TestValidateBinName(t *testing.T) {
-	assert.NoError(t, ValidateBinName("a"))
-	assert.NoError(t, ValidateBinName("123456789012345")) // exactly 15
+	assert.NoError(t, validateBinName("a"))
+	assert.NoError(t, validateBinName("123456789012345")) // exactly 15
 
-	err := ValidateBinName("1234567890123456") // 16
+	err := validateBinName("1234567890123456") // 16
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds the Aerospike limit of 15")
 
-	assert.Error(t, ValidateBinName(""))
+	assert.Error(t, validateBinName(""))
 }
 
 func TestIsTombstone(t *testing.T) {
-	assert.False(t, IsTombstone(nil, DefaultTombstoneBin))
-	assert.False(t, IsTombstone(map[string]any{"tier": "gold"}, DefaultTombstoneBin))
-	assert.False(t, IsTombstone(map[string]any{DefaultTombstoneBin: false}, DefaultTombstoneBin))
-	assert.False(t, IsTombstone(map[string]any{DefaultTombstoneBin: nil}, DefaultTombstoneBin))
-	assert.True(t, IsTombstone(map[string]any{DefaultTombstoneBin: true}, DefaultTombstoneBin))
+	assert.False(t, isFencedTombstone(nil, defaultTombstoneBin))
+	assert.False(t, isFencedTombstone(map[string]any{"tier": "gold"}, defaultTombstoneBin))
+	assert.False(t, isFencedTombstone(map[string]any{defaultTombstoneBin: false}, defaultTombstoneBin))
+	assert.False(t, isFencedTombstone(map[string]any{defaultTombstoneBin: nil}, defaultTombstoneBin))
+	assert.True(t, isFencedTombstone(map[string]any{defaultTombstoneBin: true}, defaultTombstoneBin))
 }
 
-func parseClientYAML(t *testing.T, yaml string) (*ClientConfig, error) {
+func parseClientYAML(t *testing.T, yaml string) (*clientConfig, error) {
 	t.Helper()
-	spec := service.NewConfigSpec().Fields(ClientFields()...)
+	spec := service.NewConfigSpec().Fields(clientFields()...)
 	parsed, err := spec.ParseYAML(yaml, nil)
 	if err != nil {
 		return nil, err
 	}
-	return ParseClientConfig(parsed)
+	return parseClientConfig(parsed)
 }
 
 func TestParseClientConfigAuthMode(t *testing.T) {
@@ -187,7 +187,7 @@ func TestParseHost(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.in, func(t *testing.T) {
-			h, err := ParseHost(tc.in)
+			h, err := parseHost(tc.in)
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
@@ -203,20 +203,20 @@ func TestParseHost(t *testing.T) {
 
 func TestLimitDuration(t *testing.T) {
 	t.Run("no deadline keeps the configured timeout", func(t *testing.T) {
-		d, err := LimitDuration(context.Background(), 10*time.Second)
+		d, err := limitDuration(context.Background(), 10*time.Second)
 		require.NoError(t, err)
 		assert.Equal(t, 10*time.Second, d)
 	})
 	t.Run("cancelled context fails immediately", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := LimitDuration(ctx, 10*time.Second)
+		_, err := limitDuration(ctx, 10*time.Second)
 		require.ErrorIs(t, err, context.Canceled)
 	})
 	t.Run("deadline shorter than configured wins", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		d, err := LimitDuration(ctx, 10*time.Second)
+		d, err := limitDuration(ctx, 10*time.Second)
 		require.NoError(t, err)
 		assert.Greater(t, d, time.Duration(0))
 		assert.LessOrEqual(t, d, 50*time.Millisecond)
@@ -224,7 +224,7 @@ func TestLimitDuration(t *testing.T) {
 	t.Run("configured shorter than deadline wins", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 		defer cancel()
-		d, err := LimitDuration(ctx, 10*time.Second)
+		d, err := limitDuration(ctx, 10*time.Second)
 		require.NoError(t, err)
 		assert.Equal(t, 10*time.Second, d)
 	})
@@ -238,7 +238,7 @@ func TestBatchPolicyForContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	got, err := BatchPolicyForContext(ctx, p)
+	got, err := batchPolicyForContext(ctx, p)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, got.TotalTimeout, 200*time.Millisecond)
 	assert.LessOrEqual(t, got.SocketTimeout, got.TotalTimeout)
@@ -249,23 +249,23 @@ func TestConnectCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	c := NewConnection(&ClientConfig{
+	c := newConnection(&clientConfig{
 		Policy: as.NewClientPolicy(),
 		Hosts:  []*as.Host{as.NewHost("127.0.0.1", 1)},
 	}, nil)
 
-	err := c.Connect(ctx)
+	err := c.connect(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
 func parseBatchYAML(t *testing.T, yaml string) (*as.BatchPolicy, error) {
 	t.Helper()
-	spec := service.NewConfigSpec().Fields(BatchPolicyFields()...)
+	spec := service.NewConfigSpec().Fields(batchPolicyFields()...)
 	parsed, err := spec.ParseYAML(yaml, nil)
 	if err != nil {
 		return nil, err
 	}
-	return ParseBatchPolicy(parsed)
+	return parseBatchPolicy(parsed)
 }
 
 // An unlimited total timeout must not be read as "no limit of any kind": the
@@ -275,18 +275,18 @@ func TestBatchPolicyForContextKeepsSocketTimeoutWhenTotalIsUnlimited(t *testing.
 	p.TotalTimeout = 0
 	p.SocketTimeout = 5 * time.Second
 
-	got, err := BatchPolicyForContext(context.Background(), p)
+	got, err := batchPolicyForContext(context.Background(), p)
 	require.NoError(t, err)
 	assert.Zero(t, got.TotalTimeout)
 	assert.Equal(t, 5*time.Second, got.SocketTimeout)
 }
 
 func TestParseClientConfigConnectionPoolBounds(t *testing.T) {
-	parse := func(t *testing.T, extra string) (*ClientConfig, error) {
+	parse := func(t *testing.T, extra string) (*clientConfig, error) {
 		t.Helper()
 		conf, err := outputSpec().ParseYAML(baseConfig+extra, nil)
 		require.NoError(t, err)
-		return ParseClientConfig(conf)
+		return parseClientConfig(conf)
 	}
 
 	// Warm up fills to the minimum, so a zero minimum means the default config
@@ -313,13 +313,13 @@ func TestParseClientConfigConnectionPoolBounds(t *testing.T) {
 }
 
 func TestValidateNamespaceName(t *testing.T) {
-	require.NoError(t, ValidateNamespaceName("test"))
+	require.NoError(t, validateNamespaceName("test"))
 
-	err := ValidateNamespaceName("")
+	err := validateNamespaceName("")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty")
 
-	err = ValidateNamespaceName(strings.Repeat("n", MaxNamespaceNameLen+1))
+	err = validateNamespaceName(strings.Repeat("n", maxNamespaceNameLen+1))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds the Aerospike limit of 31")
 }
@@ -347,66 +347,66 @@ func TestParseBatchPolicyZeroIsAllNodes(t *testing.T) {
 }
 
 func TestWriteBatchPolicyDefaultsToNoRetries(t *testing.T) {
-	spec := service.NewConfigSpec().Fields(BatchPolicyFieldsWithRetries(0)...)
+	spec := service.NewConfigSpec().Fields(batchPolicyFieldsWithRetries(0)...)
 	parsed, err := spec.ParseYAML("", nil)
 	require.NoError(t, err)
-	p, err := ParseBatchPolicy(parsed)
+	p, err := parseBatchPolicy(parsed)
 	require.NoError(t, err)
 	assert.Equal(t, 0, p.MaxRetries)
 }
 
 func TestEstimateSize(t *testing.T) {
-	assert.Equal(t, 0, EstimateSize(nil))
-	assert.Equal(t, 5, EstimateSize("hello"))
-	assert.Greater(t, EstimateSize([]any{"abcdefghij", "abcdefghij", "abcdefghij"}), 20)
+	assert.Equal(t, 0, estimateSize(nil))
+	assert.Equal(t, 5, estimateSize("hello"))
+	assert.Greater(t, estimateSize([]any{"abcdefghij", "abcdefghij", "abcdefghij"}), 20)
 }
 
 func TestParseCommitLevel(t *testing.T) {
-	got, err := ParseCommitLevel("all")
+	got, err := parseCommitLevel("all")
 	require.NoError(t, err)
 	assert.Equal(t, as.COMMIT_ALL, got)
 
-	got, err = ParseCommitLevel("master")
+	got, err = parseCommitLevel("master")
 	require.NoError(t, err)
 	assert.Equal(t, as.COMMIT_MASTER, got)
 
-	_, err = ParseCommitLevel("quorum")
+	_, err = parseCommitLevel("quorum")
 	require.Error(t, err)
 }
 
 func TestParseReplicaPolicy(t *testing.T) {
-	got, err := ParseReplicaPolicy("sequence")
+	got, err := parseReplicaPolicy("sequence")
 	require.NoError(t, err)
 	assert.Equal(t, as.SEQUENCE, got)
 
-	got, err = ParseReplicaPolicy("master")
+	got, err = parseReplicaPolicy("master")
 	require.NoError(t, err)
 	assert.Equal(t, as.MASTER, got)
 
-	_, err = ParseReplicaPolicy("nearest")
+	_, err = parseReplicaPolicy("nearest")
 	require.Error(t, err)
 }
 
-func parseKeyYAML(t *testing.T, yaml string) (*KeyConfig, error) {
+func parseKeyYAML(t *testing.T, yaml string) (*keyConfig, error) {
 	t.Helper()
-	spec := service.NewConfigSpec().Fields(KeyFields()...)
+	spec := service.NewConfigSpec().Fields(keyFields()...)
 	parsed, err := spec.ParseYAML(yaml, nil)
 	if err != nil {
 		return nil, err
 	}
-	return ParseKeyConfig(parsed)
+	return parseKeyConfig(parsed)
 }
 
 func resolveKey(t *testing.T, yaml string, msg *service.Message) (*as.Key, error) {
 	t.Helper()
 	k, err := parseKeyYAML(t, yaml)
 	require.NoError(t, err)
-	return k.Resolver(service.MessageBatch{msg}).Key(0)
+	return k.resolver(service.MessageBatch{msg}).resolve(0)
 }
 
 func TestKeyRejectsOverlongSetName(t *testing.T) {
 	msg := service.NewMessage([]byte(`{"id":"u1"}`))
-	msg.MetaSet("set", strings.Repeat("s", MaxSetNameLen+1))
+	msg.MetaSet("set", strings.Repeat("s", maxSetNameLen+1))
 
 	_, err := resolveKey(t, `
 namespace: test
