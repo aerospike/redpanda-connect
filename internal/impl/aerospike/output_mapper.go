@@ -241,7 +241,7 @@ func coalesceOps(ops []*pendingOp) []*pendingOp {
 	ids := make([]string, len(ops))
 	exempt := map[string]bool{}
 	for i, op := range ops {
-		ids[i] = KeyID(op.key)
+		ids[i] = keyID(op.key)
 		if op.hasGeneration {
 			exempt[ids[i]] = true
 		}
@@ -274,7 +274,7 @@ type batchMapper struct {
 	conf  *aerospikeConfig
 	batch service.MessageBatch
 
-	keys       *KeyResolver
+	keys       *keyResolver
 	bins       *service.MessageBatchBloblangExecutor
 	op         *service.MessageBatchInterpolationExecutor
 	ttl        *service.MessageBatchInterpolationExecutor
@@ -286,7 +286,7 @@ func newBatchMapper(conf *aerospikeConfig, batch service.MessageBatch) *batchMap
 	m := &batchMapper{
 		conf:  conf,
 		batch: batch,
-		keys:  conf.keys.Resolver(batch),
+		keys:  conf.keys.resolver(batch),
 		bins:  batch.BloblangExecutor(conf.bins),
 	}
 	if !conf.operationIsStatic {
@@ -306,7 +306,7 @@ func newBatchMapper(conf *aerospikeConfig, batch service.MessageBatch) *batchMap
 
 // mapMessage converts the message at the given batch index into a pending write.
 func (m *batchMapper) mapMessage(index int) (*pendingOp, error) {
-	key, err := m.keys.Key(index)
+	key, err := m.keys.resolve(index)
 	if err != nil {
 		return nil, err
 	}
@@ -454,10 +454,10 @@ func (m *batchMapper) applyBins(op *pendingOp, index int) error {
 	slices.Sort(names)
 
 	for _, name := range names {
-		if err := ValidateBinName(name); err != nil {
+		if err := validateBinName(name); err != nil {
 			return fmt.Errorf("%w; rename it in the '%v' mapping", err, fieldBins)
 		}
-		value, err := ToAerospike(obj[name], m.conf.coerceInts)
+		value, err := toAerospike(obj[name], m.conf.coerceInts)
 		if err != nil {
 			return fmt.Errorf("bin %q: %w", name, err)
 		}
@@ -467,7 +467,7 @@ func (m *batchMapper) applyBins(op *pendingOp, index int) error {
 	if m.conf.maxRecordBytes > 0 {
 		size := 0
 		for _, name := range op.binOrder {
-			size += len(name) + EstimateSize(op.bins[name])
+			size += len(name) + estimateSize(op.bins[name])
 		}
 		if size > m.conf.maxRecordBytes {
 			return fmt.Errorf("mapped record is about %d bytes, which exceeds max_record_bytes (%d); Aerospike rewrites the whole record on every update, so cap collections in the '%v' mapping or split the data across keys", size, m.conf.maxRecordBytes, fieldBins)

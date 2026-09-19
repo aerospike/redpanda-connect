@@ -32,8 +32,8 @@ func newTestProcessor(t *testing.T, yaml string) *lookupProcessor {
 	parsed, err := parseLookupConfig(conf)
 	require.NoError(t, err)
 	// Mirror newLookupProcessor, so tests see the pool the pipeline would get.
-	parsed.client.SizePoolForConcurrency(defaultLookupConcurrency)
-	return &lookupProcessor{conf: parsed, conn: NewConnection(parsed.client, nil)}
+	parsed.client.sizePoolForConcurrency(defaultLookupConcurrency)
+	return &lookupProcessor{conf: parsed, conn: newConnection(parsed.client, nil)}
 }
 
 const lookupBaseConfig = `
@@ -100,7 +100,7 @@ func TestNamedBinsAreRequested(t *testing.T) {
 	reads := p.planReads(batch)
 	require.Len(t, reads, 1)
 	assert.False(t, reads[0].read.ReadAllBins)
-	assert.Equal(t, []string{"tier", "ltv", DefaultTombstoneBin}, reads[0].read.BinNames)
+	assert.Equal(t, []string{"tier", "ltv", defaultTombstoneBin}, reads[0].read.BinNames)
 }
 
 func TestConfigRejectsLongBinName(t *testing.T) {
@@ -163,7 +163,7 @@ func TestTombstoneRecordIsNotFound(t *testing.T) {
 
 	rec := &as.BatchRecord{
 		ResultCode: types.OK,
-		Record:     &as.Record{Bins: as.BinMap{DefaultTombstoneBin: true, "tier": "gold"}},
+		Record:     &as.Record{Bins: as.BinMap{defaultTombstoneBin: true, "tier": "gold"}},
 	}
 	assert.Equal(t, resultKeep, p.applyResult(m, rec))
 	v, err := m.AsStructured()
@@ -236,7 +236,7 @@ func TestApplyResultStripsFencingBins(t *testing.T) {
 	rec := &as.BatchRecord{
 		ResultCode: types.OK,
 		Record: &as.Record{
-			Bins: as.BinMap{"tier": "gold", DefaultFenceBin: int64(42)},
+			Bins: as.BinMap{"tier": "gold", defaultFenceBin: int64(42)},
 		},
 	}
 	require.Equal(t, resultKeep, p.applyResult(m, rec))
@@ -253,14 +253,14 @@ func TestApplyResultKeepsFenceBinWhenCheckDisabled(t *testing.T) {
 	rec := &as.BatchRecord{
 		ResultCode: types.OK,
 		Record: &as.Record{
-			Bins: as.BinMap{"tier": "gold", DefaultFenceBin: int64(42)},
+			Bins: as.BinMap{"tier": "gold", defaultFenceBin: int64(42)},
 		},
 	}
 	require.Equal(t, resultKeep, p.applyResult(m, rec))
 
 	v, err := m.AsStructured()
 	require.NoError(t, err)
-	assert.Equal(t, map[string]any{"tier": "gold", DefaultFenceBin: int64(42)}, v)
+	assert.Equal(t, map[string]any{"tier": "gold", defaultFenceBin: int64(42)}, v)
 }
 
 func TestParseReadPolicy(t *testing.T) {

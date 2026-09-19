@@ -21,22 +21,22 @@ import (
 	"math"
 )
 
-// MaxBinNameLen is a hard server limit. Exceeding it is rejected with
+// maxBinNameLen is a hard server limit. Exceeding it is rejected with
 // BIN_NAME_TOO_LONG, so components check it locally where the error can name
 // the offending field.
-const MaxBinNameLen = 15
+const maxBinNameLen = 15
 
-// DefaultTombstoneBin marks a fenced delete. The record is kept so the fence
+// defaultTombstoneBin marks a fenced delete. The record is kept so the fence
 // survives; lookups treat a record carrying this bin as missing.
-const DefaultTombstoneBin = "_deleted"
+const defaultTombstoneBin = "_deleted"
 
-// DefaultFenceBin holds the monotonic fence value written alongside a record.
+// defaultFenceBin holds the monotonic fence value written alongside a record.
 // It is bookkeeping rather than data, so lookups strip it.
-const DefaultFenceBin = "_fence"
+const defaultFenceBin = "_fence"
 
-// IsTombstone reports whether bins represent a fenced delete rather than a
+// isFencedTombstone reports whether bins represent a fenced delete rather than a
 // live record. A missing or nil/false value is not a tombstone.
-func IsTombstone(bins map[string]any, bin string) bool {
+func isFencedTombstone(bins map[string]any, bin string) bool {
 	if bin == "" || bins == nil {
 		return false
 	}
@@ -50,27 +50,27 @@ func IsTombstone(bins map[string]any, bin string) bool {
 	return true
 }
 
-// ValidateBinName checks a bin name against the server's length limit, so the
+// validateBinName checks a bin name against the server's length limit, so the
 // error can name the field that produced it rather than surfacing as a
 // BIN_NAME_TOO_LONG result code.
-func ValidateBinName(name string) error {
+func validateBinName(name string) error {
 	if name == "" {
 		return errors.New("bin name must not be empty")
 	}
-	if len(name) > MaxBinNameLen {
-		return fmt.Errorf("bin name %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), MaxBinNameLen)
+	if len(name) > maxBinNameLen {
+		return fmt.Errorf("bin name %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), maxBinNameLen)
 	}
 	return nil
 }
 
-// ToAerospike normalises a decoded JSON value into something the client stores
+// toAerospike normalises a decoded JSON value into something the client stores
 // with the intended type.
 //
 // The case that matters is numbers: JSON has one number type, so an identifier
 // or a counter arrives as a float64 and would be stored as an Aerospike double.
 // That breaks integer comparisons, `add` operations and integer secondary
 // indexes, so integral values become int64 when coerceInts is set.
-func ToAerospike(v any, coerceInts bool) (any, error) {
+func toAerospike(v any, coerceInts bool) (any, error) {
 	switch t := v.(type) {
 	case nil:
 		// A nil bin value deletes the bin from the record.
@@ -100,7 +100,7 @@ func ToAerospike(v any, coerceInts bool) (any, error) {
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, val := range t {
-			conv, err := ToAerospike(val, coerceInts)
+			conv, err := toAerospike(val, coerceInts)
 			if err != nil {
 				return nil, fmt.Errorf("key %q: %w", k, err)
 			}
@@ -110,7 +110,7 @@ func ToAerospike(v any, coerceInts bool) (any, error) {
 	case []any:
 		out := make([]any, len(t))
 		for i, val := range t {
-			conv, err := ToAerospike(val, coerceInts)
+			conv, err := toAerospike(val, coerceInts)
 			if err != nil {
 				return nil, fmt.Errorf("index %d: %w", i, err)
 			}
@@ -135,31 +135,31 @@ func convertFloat(f float64, coerceInts bool) any {
 	return int64(f)
 }
 
-// FromAerospike converts a value read back from a record into something that
+// fromAerospike converts a value read back from a record into something that
 // can be serialised as JSON.
 //
 // The conversion is not cosmetic: Aerospike map keys are not restricted to
 // strings, so a map bin unpacks as map[any]any, which encoding/json cannot
 // marshal at all. Keys are stringified, which is lossy for exotic key types but
 // is the only representation JSON has.
-func FromAerospike(v any) any {
+func fromAerospike(v any) any {
 	switch t := v.(type) {
 	case map[any]any:
 		out := make(map[string]any, len(t))
 		for k, val := range t {
-			out[stringifyKey(k)] = FromAerospike(val)
+			out[stringifyKey(k)] = fromAerospike(val)
 		}
 		return out
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, val := range t {
-			out[k] = FromAerospike(val)
+			out[k] = fromAerospike(val)
 		}
 		return out
 	case []any:
 		out := make([]any, len(t))
 		for i, val := range t {
-			out[i] = FromAerospike(val)
+			out[i] = fromAerospike(val)
 		}
 		return out
 	case []byte:
@@ -170,11 +170,11 @@ func FromAerospike(v any) any {
 	}
 }
 
-// EstimateSize returns a conservative byte count for a value about to be stored
+// estimateSize returns a conservative byte count for a value about to be stored
 // as a bin. It is not the on-wire size — it exists so a mapping can be rejected
 // before the server returns RECORD_TOO_BIG. Nested lists and maps are walked
 // because an unbounded collection is how records grow past the I/O budget.
-func EstimateSize(v any) int {
+func estimateSize(v any) int {
 	switch t := v.(type) {
 	case nil:
 		return 0
@@ -189,13 +189,13 @@ func EstimateSize(v any) int {
 	case map[string]any:
 		n := 0
 		for k, val := range t {
-			n += len(k) + EstimateSize(val)
+			n += len(k) + estimateSize(val)
 		}
 		return n
 	case []any:
 		n := 0
 		for _, val := range t {
-			n += EstimateSize(val)
+			n += estimateSize(val)
 		}
 		return n
 	default:
