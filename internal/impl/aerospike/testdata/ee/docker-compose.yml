@@ -3,6 +3,7 @@
 #
 #   as-ee-1 + as-ee-2  unsecured RF=2, ns test + sc
 #   as-ee-sec          security + TLS (user rpcn / rpcnpass)
+#   as-ee-tools        aql / asadm / asinfo on the Compose network
 
 # Docker Desktop project name (not the Aerospike cluster-name).
 name: aero-redpanda-ee
@@ -44,3 +45,17 @@ services:
       - ./certs:/opt/rpcn/certs:ro
       - ${AEROSPIKE_FEATURE_KEY:?set AEROSPIKE_FEATURE_KEY to your features.conf}:/opt/rpcn/features.conf:ro
     command: ["--config-file", "/opt/rpcn/aerospike.conf"]
+
+  as-ee-tools:
+    image: aerospike/aerospike-tools:latest
+    container_name: as-ee-tools
+    hostname: as-ee-tools
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - ./certs:/opt/rpcn/certs:ro
+      - ./astools.conf:/etc/aerospike/astools.conf:ro
+      - ./aql-ee.sh:/usr/local/bin/aql-ee:ro
+    depends_on:
+      - as-ee-1
+      - as-ee-2
+      - as-ee-sec
