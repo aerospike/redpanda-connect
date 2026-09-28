@@ -17,12 +17,16 @@ package aerospike
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -101,7 +105,7 @@ func startAerospike() (string, error) {
 		testcontainers.WithExposedPorts(aerospikeContainerPort),
 		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) {
 			hc.PortBindings = mobynet.PortMap{
-				mobynet.MustParsePort(aerospikeContainerPort): {{HostPort: hostPortStr}},
+				mobynet.MustParsePort(aerospikeContainerPort): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: hostPortStr}},
 			}
 		}),
 		testcontainers.WithCmd("--config-file", "/opt/aerospike/etc/aerospike.conf"),
@@ -145,13 +149,22 @@ func freeHostPort() (int, error) {
 	return port, nil
 }
 
+// servicePortLine matches the network.service port line. Heartbeat and fabric
+// use other ports, so port 3000 is unique in the config.
+var servicePortLine = regexp.MustCompile(`(?m)^([ \t]*)port[ \t]+3000[ \t]*\r?$`)
+
 func aerospikeConfWithHostAccess(base []byte, hostPort int) ([]byte, error) {
-	const needle = "        port 3000\n"
-	if !bytes.Contains(base, []byte(needle)) {
-		return nil, fmt.Errorf("testdata/aerospike.conf: missing %q in network.service", needle)
+	loc := servicePortLine.FindSubmatchIndex(base)
+	if loc == nil {
+		return nil, errors.New("testdata/aerospike.conf: missing 'port 3000' in network.service")
 	}
-	insert := fmt.Sprintf("%s        access-address 127.0.0.1\n        access-port %d\n", needle, hostPort)
-	return bytes.Replace(base, []byte(needle), []byte(insert), 1), nil
+	indent := string(base[loc[2]:loc[3]])
+	insert := fmt.Sprintf("\n%saccess-address 127.0.0.1\n%saccess-port %d", indent, indent, hostPort)
+
+	out := make([]byte, 0, len(base)+len(insert))
+	out = append(out, base[:loc[1]]...)
+	out = append(out, insert...)
+	return append(out, base[loc[1]:]...), nil
 }
 
 func TestAerospikeConfWithHostAccess(t *testing.T) {
@@ -162,8 +175,15 @@ func TestAerospikeConfWithHostAccess(t *testing.T) {
 
 	got, err := aerospikeConfWithHostAccess(base, 18412)
 	require.NoError(t, err)
-	assert.Contains(t, string(got), "access-address 127.0.0.1")
-	assert.Contains(t, string(got), "access-port 18412")
+	assert.Contains(t, string(got), "        port 3000\n        access-address 127.0.0.1\n        access-port 18412\n")
+	assert.Equal(t, 1, strings.Count(string(got), "access-address"))
+
+	got, err = aerospikeConfWithHostAccess([]byte("network {\n\tservice {\n\t\tport 3000\n\t}\n}\n"), 1)
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "\t\tport 3000\n\t\taccess-address 127.0.0.1\n\t\taccess-port 1\n")
+
+	_, err = aerospikeConfWithHostAccess([]byte("network {}\n"), 1)
+	require.Error(t, err)
 }
 
 func waitForClient(ctx context.Context, addr string) error {

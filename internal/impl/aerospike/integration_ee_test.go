@@ -167,6 +167,27 @@ func TestEEClusterIsMultiNode(t *testing.T) {
 	assert.GreaterOrEqual(t, nsStat(t, client, eeAPNamespace, "effective_replication_factor"), int64(2)*int64(len(nodes)))
 }
 
+// Short TTL + nsup-period 10: write, see the record, wait until NSUP drops it.
+func TestEETTLExpiresRemovesRecord(t *testing.T) {
+	w, client := eeWriter(t, eeAPNamespace, "ttl: 2s\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"ttl-gone","v":"temp"}`),
+	}))
+	rec := eeRead(t, client, eeAPNamespace, "ttl-gone")
+	require.NotNil(t, rec, "record must exist before NSUP runs")
+	assert.InDelta(t, 2, rec.Expiration, 2)
+
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		if eeRead(t, client, eeAPNamespace, "ttl-gone") == nil {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatal("record still present after TTL + nsup-period; check namespace test has nsup-period 10")
+}
+
 // A durable delete leaves a tombstone behind so the record cannot be
 // resurrected by a cold restart. Community Edition rejects the flag outright.
 func TestEEDurableDelete(t *testing.T) {

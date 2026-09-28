@@ -32,9 +32,9 @@ var connectionCodes = []types.ResultCode{
 	types.INVALID_CREDENTIAL,
 }
 
-// IsConnectionError reports whether err is a transport or auth failure that
+// isConnectionError reports whether err is a transport or auth failure that
 // should trigger a reconnect rather than a per-message nack.
-func IsConnectionError(err error) bool {
+func isConnectionError(err error) bool {
 	var asErr as.Error
 	if !errors.As(err, &asErr) {
 		return false
@@ -42,10 +42,10 @@ func IsConnectionError(err error) bool {
 	return asErr.Matches(connectionCodes...)
 }
 
-// ExplainResultCode turns a server result code into something a person can act
+// explainResultCode turns a server result code into something a person can act
 // on, rather than a bare number they have to look up. Callers add
 // operation-specific detail before falling back to this.
-func ExplainResultCode(code types.ResultCode) string {
+func explainResultCode(code types.ResultCode) string {
 	switch code {
 	case types.KEY_BUSY:
 		return "hot key: too many concurrent commands against this one record (see transaction-pending-limit, default 20). " +

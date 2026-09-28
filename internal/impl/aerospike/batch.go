@@ -24,80 +24,74 @@ import (
 
 // Configuration field names for Aerospike batch commands.
 const (
-	FieldConcurrentNodes = "concurrent_nodes"
-	FieldSocketTimeout   = "socket_timeout"
-	FieldTotalTimeout    = "total_timeout"
-	FieldMaxRetries      = "max_retries"
+	fieldConcurrentNodes = "concurrent_nodes"
+	fieldSocketTimeout   = "socket_timeout"
+	fieldTotalTimeout    = "total_timeout"
+	fieldMaxRetries      = "max_retries"
 )
 
-// NonNegativeLint rejects negative integers in config fields that must be >= 0.
-const NonNegativeLint = `root = if this < 0 { [ "must not be negative" ] }`
-
-// PositiveLint rejects non-positive integers in config fields that must be > 0.
-const PositiveLint = `root = if this < 1 { [ "must be at least 1" ] }`
-
-// BatchPolicyFields returns the Aerospike batch-command fields shared by the
+// batchPolicyFields returns the Aerospike batch-command fields shared by the
 // output and the lookup processor. Reads default to two retries.
-func BatchPolicyFields() []*service.ConfigField {
-	return BatchPolicyFieldsWithRetries(2)
+func batchPolicyFields() []*service.ConfigField {
+	return batchPolicyFieldsWithRetries(2)
 }
 
-// BatchPolicyFieldsWithRetries is BatchPolicyFields with an explicit retry
+// batchPolicyFieldsWithRetries is batchPolicyFields with an explicit retry
 // default. Writes should pass 0: create_only is not safe to repeat, and a
 // retry after an uncertain timeout can insert a second record.
-func BatchPolicyFieldsWithRetries(maxRetries int) []*service.ConfigField {
+func batchPolicyFieldsWithRetries(maxRetries int) []*service.ConfigField {
 	retryDesc := "Client-side retries per batch command."
 	if maxRetries == 0 {
 		retryDesc += " Defaults to 0 because some write operations (`create_only`, counters) are not idempotent. Raise this only for `replace`/`write` that you have made safe to repeat, for example with fencing."
 	}
 
 	return []*service.ConfigField{
-		service.NewIntField(FieldConcurrentNodes).
+		service.NewIntField(fieldConcurrentNodes).
 			Description("How many cluster nodes to issue batch sub-requests to concurrently. `0` means all of them in parallel. Note this defaults to fanning out where the Aerospike client itself defaults to `1` (one node at a time); combined with `max_in_flight` it multiplies the load a single pipeline can place on a cluster, so lower it if the cluster is the bottleneck.").
 			Default(0).
-			LintRule(NonNegativeLint).
+			LintRule(nonNegativeLint).
 			Advanced(),
 
-		service.NewDurationField(FieldSocketTimeout).
+		service.NewDurationField(fieldSocketTimeout).
 			Description("Per-attempt socket timeout for a batch command. Capped by the remaining pipeline context deadline when one is set. A whole batch has to complete within this window, so raise it if batches are large or the cluster is loaded — with `max_retries` at `0` a socket timeout fails the batch rather than being retried.").
 			Default("5s").
 			Advanced(),
 
-		service.NewDurationField(FieldTotalTimeout).
+		service.NewDurationField(fieldTotalTimeout).
 			Description("Total timeout for a batch command including retries. Capped by the remaining pipeline context deadline when one is set, so a shutdown cannot wait for the full configured timeout.").
 			Default("10s").
 			Advanced(),
 
-		service.NewIntField(FieldMaxRetries).
+		service.NewIntField(fieldMaxRetries).
 			Description(retryDesc).
 			Default(maxRetries).
-			LintRule(NonNegativeLint).
+			LintRule(nonNegativeLint).
 			Advanced(),
 	}
 }
 
-// ParseBatchPolicy reads the fields produced by BatchPolicyFields.
-func ParseBatchPolicy(conf *service.ParsedConfig) (*as.BatchPolicy, error) {
+// parseBatchPolicy reads the fields produced by batchPolicyFields.
+func parseBatchPolicy(conf *service.ParsedConfig) (*as.BatchPolicy, error) {
 	p := as.NewBatchPolicy()
 
 	var err error
-	if p.ConcurrentNodes, err = conf.FieldInt(FieldConcurrentNodes); err != nil {
+	if p.ConcurrentNodes, err = conf.FieldInt(fieldConcurrentNodes); err != nil {
 		return nil, err
 	}
 	if p.ConcurrentNodes < 0 {
-		return nil, fmt.Errorf("field '%v' must not be negative", FieldConcurrentNodes)
+		return nil, fmt.Errorf("field '%v' must not be negative", fieldConcurrentNodes)
 	}
-	if p.SocketTimeout, err = conf.FieldDuration(FieldSocketTimeout); err != nil {
+	if p.SocketTimeout, err = conf.FieldDuration(fieldSocketTimeout); err != nil {
 		return nil, err
 	}
-	if p.TotalTimeout, err = conf.FieldDuration(FieldTotalTimeout); err != nil {
+	if p.TotalTimeout, err = conf.FieldDuration(fieldTotalTimeout); err != nil {
 		return nil, err
 	}
-	if p.MaxRetries, err = conf.FieldInt(FieldMaxRetries); err != nil {
+	if p.MaxRetries, err = conf.FieldInt(fieldMaxRetries); err != nil {
 		return nil, err
 	}
 	if p.MaxRetries < 0 {
-		return nil, fmt.Errorf("field '%v' must not be negative", FieldMaxRetries)
+		return nil, fmt.Errorf("field '%v' must not be negative", fieldMaxRetries)
 	}
 	// Per-key result codes are how individual messages are nacked, so require
 	// the server to report on every key rather than short-circuiting the batch.

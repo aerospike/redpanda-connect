@@ -16,10 +16,6 @@ package aerospike
 
 import (
 	"fmt"
-	"math"
-	"strconv"
-	"strings"
-	"time"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 
@@ -30,14 +26,12 @@ import (
 const (
 	fieldOperation            = "operation"
 	fieldTombstoneAsDelete    = "tombstone_as_delete"
-	fieldBins                 = "bins"
 	fieldCoerceIntegralFloats = "coerce_integral_floats"
 	fieldTTL                  = "ttl"
 	fieldGeneration           = "generation"
 	fieldSendKey              = "send_key"
 	fieldDurableDelete        = "durable_delete"
 	fieldCoalesceBatchKeys    = "coalesce_batch_keys"
-	fieldCommitLevel          = "commit_level"
 	fieldMaxRecordBytes       = "max_record_bytes"
 	fieldFencing              = "fencing"
 	fieldFencingEnabled       = "enabled"
@@ -115,8 +109,8 @@ available — shape the record in Bloblang and write the full bin values. There 
 Aerospike has no client-side change feed.
 ` + service.OutputPerformanceDocs(true, true))
 
-	spec = spec.Fields(ClientFields()...)
-	spec = spec.Fields(KeyFields(`${! json("user_id") }`, `${! meta("kafka_key") }`)...)
+	spec = spec.Fields(clientFields()...)
+	spec = spec.Fields(keyFields(`${! json("user_id") }`, `${! meta("kafka_key") }`)...)
 
 	spec = spec.Fields(
 		service.NewInterpolatedStringField(fieldOperation).
@@ -186,15 +180,15 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 			Default(true).
 			Advanced(),
 
-		CommitLevelField(),
+		commitLevelField(),
 
 		service.NewIntField(fieldMaxRecordBytes).
 			Description("Reject a mapped record whose bins exceed this many bytes (approximate). `0` disables the check. Aerospike rewrites the whole record on every update, so treat anything above about 50 KiB as a modeling decision to justify — set a budget here rather than waiting for `RECORD_TOO_BIG`.").
 			Default(0).
-			LintRule(NonNegativeLint).
+			LintRule(nonNegativeLint).
 			Advanced(),
 	)
-	spec = spec.Fields(BatchPolicyFieldsWithRetries(0)...)
+	spec = spec.Fields(batchPolicyFieldsWithRetries(0)...)
 	return spec.Fields(
 		service.NewObjectField(fieldFencing,
 			service.NewBoolField(fieldFencingEnabled).
@@ -202,7 +196,7 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 				Default(false),
 			service.NewStringField(fieldFencingBin).
 				Description("Bin holding the fence value. Counts toward the 15 character bin name limit. Must match `fence_bin` on `aerospike_lookup`, which strips it from the records it emits.").
-				Default(DefaultFenceBin),
+				Default(defaultFenceBin),
 			service.NewInterpolatedStringField(fieldFencingValue).
 				Description("An integer that increases monotonically for a given record key. The Kafka offset satisfies this when keys map to partitions consistently, which is the default partitioner's behaviour.").
 				Default(`${! meta("kafka_offset") }`).
@@ -210,7 +204,7 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 				Example(`${! json("version") }`),
 			service.NewStringField(fieldFencingTombstoneBin).
 				Description("Bin written on a fenced delete to mark the record as a tombstone. Lookups treat a record carrying this bin as missing. Counts toward the 15 character bin name limit.").
-				Default(DefaultTombstoneBin),
+				Default(defaultTombstoneBin),
 			service.NewStringField(fieldFencingTombstoneTTL).
 				Description(`Time-to-live for fenced tombstone records. Accepts a duration, or `+"`never`"+`. Defaults to `+"`never`"+` so the fence outlives the data TTL; if the tombstone expires, a stale replay can recreate the record.
 
@@ -279,8 +273,8 @@ output:
 
 // aerospikeConfig is the parsed, validated form of the output configuration.
 type aerospikeConfig struct {
-	client *ClientConfig
-	keys   *KeyConfig
+	client *clientConfig
+	keys   *keyConfig
 
 	operation         *service.InterpolatedString
 	staticOperation   opKind
@@ -315,10 +309,10 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 	c := &aerospikeConfig{}
 
 	var err error
-	if c.client, err = ParseClientConfig(conf); err != nil {
+	if c.client, err = parseClientConfig(conf); err != nil {
 		return nil, err
 	}
-	if c.keys, err = ParseKeyConfig(conf); err != nil {
+	if c.keys, err = parseKeyConfig(conf); err != nil {
 		return nil, err
 	}
 
@@ -391,10 +385,10 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 		}
 	}
 	if c.fenceEnabled {
-		if err := ValidateBinName(c.fenceBin); err != nil {
+		if err := validateBinName(c.fenceBin); err != nil {
 			return nil, fmt.Errorf("field '%v.%v': %w", fieldFencing, fieldFencingBin, err)
 		}
-		if err := ValidateBinName(c.tombstoneBin); err != nil {
+		if err := validateBinName(c.tombstoneBin); err != nil {
 			return nil, fmt.Errorf("field '%v.%v': %w", fieldFencing, fieldFencingTombstoneBin, err)
 		}
 		if c.tombstoneBin == c.fenceBin {
@@ -411,7 +405,7 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 		return nil, err
 	}
 
-	if c.batchPolicy, err = ParseBatchPolicy(conf); err != nil {
+	if c.batchPolicy, err = parseBatchPolicy(conf); err != nil {
 		return nil, err
 	}
 
@@ -427,7 +421,7 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	commit, err := ParseCommitLevel(commitStr)
+	commit, err := parseCommitLevel(commitStr)
 	if err != nil {
 		return nil, fmt.Errorf("field '%v': %w", fieldCommitLevel, err)
 	}
@@ -435,78 +429,4 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 	c.deletePolicy.CommitLevel = commit
 
 	return c, nil
-}
-
-// parseTTL converts a configured TTL into the server's expiration encoding.
-//
-// Sentinels and Go durations (24h, 90s) are accepted. kafka-inbound payloads
-// use case-insensitive S/M/H/D and a bare number as seconds, so 24H, 1D and
-// 3600 must parse the same way without rewriting producers.
-func parseTTL(s string) (uint32, error) {
-	s = strings.TrimSpace(s)
-	lower := strings.ToLower(s)
-	switch lower {
-	case "", "0", "0s", "default":
-		return as.TTLServerDefault, nil
-	case "never", "-1":
-		return as.TTLDontExpire, nil
-	case "keep", "-2":
-		return as.TTLDontUpdate, nil
-	}
-
-	secs, err := parseTTLSeconds(lower)
-	if err != nil {
-		return 0, fmt.Errorf("invalid ttl %q: expected a duration, kafka-inbound unit (S/M/H/D), bare seconds, 'never' or 'keep': %w", s, err)
-	}
-	if secs < 0 {
-		return 0, fmt.Errorf("invalid ttl %q: must not be negative", s)
-	}
-	if secs >= math.MaxUint32-1 {
-		return 0, fmt.Errorf("invalid ttl %q: exceeds the maximum expiration", s)
-	}
-	return uint32(secs), nil
-}
-
-func parseTTLSeconds(lower string) (int64, error) {
-	if n, err := strconv.ParseInt(lower, 10, 64); err == nil {
-		return n, nil
-	}
-	if strings.HasSuffix(lower, "d") {
-		days, err := strconv.ParseInt(strings.TrimSuffix(lower, "d"), 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid day duration")
-		}
-		if days > math.MaxInt64/86400 {
-			return 0, fmt.Errorf("exceeds the maximum expiration")
-		}
-		if days < math.MinInt64/86400 {
-			return 0, fmt.Errorf("must not be negative")
-		}
-		return days * 86400, nil
-	}
-	d, err := time.ParseDuration(lower)
-	if err != nil {
-		return 0, err
-	}
-	if d < 0 {
-		return 0, fmt.Errorf("must not be negative")
-	}
-	secs := int64(d / time.Second)
-	if d > 0 && secs == 0 {
-		// A sub-second TTL would round to "use namespace default", which is the
-		// opposite of what was asked for.
-		return 0, fmt.Errorf("the minimum resolution is one second")
-	}
-	return secs, nil
-}
-
-// formatTTL renders a record's expiration in the form parseTTL accepts, so a
-// TTL read by aerospike_lookup can be fed straight back into the output's ttl
-// field. The client reports a record that never expires as a sentinel rather
-// than a duration, which would otherwise surface to the user as "4294967295".
-func formatTTL(expiration uint32) string {
-	if expiration == as.TTLDontExpire {
-		return "never"
-	}
-	return (time.Duration(expiration) * time.Second).String()
 }

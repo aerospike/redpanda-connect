@@ -87,8 +87,8 @@ This is a primary-key lookup, not a query. Secondary indexes, scans, and joins a
 scope: denormalise into the record the write path stores, or issue another keyed lookup.
 `)
 
-	spec = spec.Fields(ClientFields()...)
-	spec = spec.Fields(KeyFields(`${! json("user_id") }`, `${! meta("kafka_key") }`)...)
+	spec = spec.Fields(clientFields()...)
+	spec = spec.Fields(keyFields(`${! json("user_id") }`, `${! meta("kafka_key") }`)...)
 
 	spec = spec.Fields(
 		service.NewStringListField(fieldBins).
@@ -111,16 +111,16 @@ scope: denormalise into the record the write path stores, or issue another keyed
 
 		service.NewStringField(fieldTombstoneBin).
 			Description("Treat a record that carries this bin as missing, and strip it from the emitted document. Must match `fencing.tombstone_bin` on the Aerospike output when fencing is enabled. Empty disables the check.").
-			Default(DefaultTombstoneBin).
+			Default(defaultTombstoneBin).
 			Advanced(),
 
 		service.NewStringField(fieldFenceBin).
 			Description("Strip this bin from the emitted document. Fencing bookkeeping is not part of the record's data, so leaving it in place would graft an internal field onto every enriched message. Must match `fencing.bin` on the Aerospike output when fencing is enabled. Empty disables the check.").
-			Default(DefaultFenceBin).
+			Default(defaultFenceBin).
 			Advanced(),
 	)
-	spec = spec.Fields(BatchPolicyFields()...)
-	spec = spec.Fields(ReadPolicyFields()...)
+	spec = spec.Fields(batchPolicyFields()...)
+	spec = spec.Fields(readPolicyFields()...)
 	return spec.
 		Example(
 			"Enrich a stream with a user profile",
@@ -159,8 +159,8 @@ pipeline:
 }
 
 type lookupConfig struct {
-	client *ClientConfig
-	keys   *KeyConfig
+	client *clientConfig
+	keys   *keyConfig
 
 	// binNames is what the client is asked for, which includes the tombstone
 	// bin when it is not already named: a record can only be recognised as a
@@ -180,10 +180,10 @@ func parseLookupConfig(conf *service.ParsedConfig) (*lookupConfig, error) {
 	c := &lookupConfig{}
 
 	var err error
-	if c.client, err = ParseClientConfig(conf); err != nil {
+	if c.client, err = parseClientConfig(conf); err != nil {
 		return nil, err
 	}
-	if c.keys, err = ParseKeyConfig(conf); err != nil {
+	if c.keys, err = parseKeyConfig(conf); err != nil {
 		return nil, err
 	}
 
@@ -191,7 +191,7 @@ func parseLookupConfig(conf *service.ParsedConfig) (*lookupConfig, error) {
 		return nil, err
 	}
 	for _, name := range c.binNames {
-		if err := ValidateBinName(name); err != nil {
+		if err := validateBinName(name); err != nil {
 			return nil, fmt.Errorf("field '%v': %w", fieldBins, err)
 		}
 	}
@@ -209,7 +209,7 @@ func parseLookupConfig(conf *service.ParsedConfig) (*lookupConfig, error) {
 		return nil, err
 	}
 	if c.tombstoneBin != "" {
-		if err := ValidateBinName(c.tombstoneBin); err != nil {
+		if err := validateBinName(c.tombstoneBin); err != nil {
 			return nil, fmt.Errorf("field '%v': %w", fieldTombstoneBin, err)
 		}
 	}
@@ -217,7 +217,7 @@ func parseLookupConfig(conf *service.ParsedConfig) (*lookupConfig, error) {
 		return nil, err
 	}
 	if c.fenceBin != "" {
-		if err := ValidateBinName(c.fenceBin); err != nil {
+		if err := validateBinName(c.fenceBin); err != nil {
 			return nil, fmt.Errorf("field '%v': %w", fieldFenceBin, err)
 		}
 	}
@@ -231,10 +231,10 @@ func parseLookupConfig(conf *service.ParsedConfig) (*lookupConfig, error) {
 
 	c.readPolicy = as.NewBatchReadPolicy()
 
-	if c.batchPolicy, err = ParseBatchPolicy(conf); err != nil {
+	if c.batchPolicy, err = parseBatchPolicy(conf); err != nil {
 		return nil, err
 	}
-	if err := ApplyReadPolicy(conf, c.batchPolicy); err != nil {
+	if err := applyReadPolicy(conf, c.batchPolicy); err != nil {
 		return nil, err
 	}
 
@@ -249,18 +249,18 @@ func newLookupProcessor(conf *service.ParsedConfig, mgr *service.Resources) (ser
 	// A processor has no max_in_flight to read: its concurrency is whatever the
 	// pipeline runs it at. Size for a typical thread count so lookups are not
 	// the first thing to find an empty pool.
-	parsed.client.SizePoolForConcurrency(defaultLookupConcurrency)
+	parsed.client.sizePoolForConcurrency(defaultLookupConcurrency)
 
 	return &lookupProcessor{
 		conf: parsed,
-		conn: NewConnection(parsed.client, mgr.Logger()),
+		conn: newConnection(parsed.client, mgr.Logger()),
 		log:  mgr.Logger(),
 	}, nil
 }
 
 type lookupProcessor struct {
 	conf *lookupConfig
-	conn *Connection
+	conn *connection
 	log  *service.Logger
 
 	// Processors have no Connect callback, so the cluster connection is
@@ -269,11 +269,11 @@ type lookupProcessor struct {
 }
 
 func (p *lookupProcessor) Close(ctx context.Context) error {
-	return p.conn.Close(ctx)
+	return p.conn.close(ctx)
 }
 
 func (p *lookupProcessor) client(ctx context.Context) (*as.Client, error) {
-	if client := p.conn.Client(); client != nil {
+	if client := p.conn.asClient(); client != nil {
 		return client, nil
 	}
 
@@ -281,16 +281,16 @@ func (p *lookupProcessor) client(ctx context.Context) (*as.Client, error) {
 	defer p.connectMut.Unlock()
 
 	// Another goroutine may have connected while we waited for the lock.
-	if client := p.conn.Client(); client != nil {
+	if client := p.conn.asClient(); client != nil {
 		return client, nil
 	}
-	if err := p.conn.Connect(ctx); err != nil {
+	if err := p.conn.connect(ctx); err != nil {
 		if p.log != nil {
 			p.log.Errorf("Connecting to Aerospike: %v", err)
 		}
 		return nil, err
 	}
-	return p.conn.Client(), nil
+	return p.conn.asClient(), nil
 }
 
 // pendingRead is one deduplicated record read, plus the batch indexes waiting
@@ -321,18 +321,18 @@ func (p *lookupProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 		records[i] = r.read
 	}
 
-	policy, err := BatchPolicyForContext(ctx, p.conf.batchPolicy)
+	policy, err := batchPolicyForContext(ctx, p.conf.batchPolicy)
 	if err != nil {
 		return nil, err
 	}
 
 	if batchErr := client.BatchOperate(policy, records); batchErr != nil {
-		if IsConnectionError(batchErr) {
+		if isConnectionError(batchErr) {
 			if p.log != nil {
 				p.log.Errorf("Aerospike lookup batch failed: %v", batchErr)
 			}
 			// Drop the client so the next batch reconnects, and fail this one.
-			_ = p.conn.Close(ctx)
+			_ = p.conn.close(ctx)
 			return nil, batchErr
 		}
 		// Otherwise fall through: per-key result codes say which keys failed.
@@ -355,19 +355,19 @@ func (p *lookupProcessor) ProcessBatch(ctx context.Context, batch service.Messag
 // references the same entity many times issues one read for it. Messages whose
 // key cannot be resolved are marked in place and contribute no read.
 func (p *lookupProcessor) planReads(batch service.MessageBatch) []*pendingRead {
-	resolver := p.conf.keys.Resolver(batch)
+	resolver := p.conf.keys.resolver(batch)
 
 	reads := make([]*pendingRead, 0, len(batch))
 	byKey := make(map[string]*pendingRead, len(batch))
 
 	for i := range batch {
-		key, err := resolver.Key(i)
+		key, err := resolver.resolve(i)
 		if err != nil {
 			batch[i].SetError(err)
 			continue
 		}
 
-		id := KeyID(key)
+		id := keyID(key)
 		if prev, exists := byKey[id]; exists {
 			prev.indexes = append(prev.indexes, i)
 			continue
@@ -398,10 +398,10 @@ func (p *lookupProcessor) applyResult(msg *service.Message, rec *as.BatchRecord)
 		if rec.Record == nil {
 			return p.applyNotFound(msg)
 		}
-		if IsTombstone(map[string]any(rec.Record.Bins), p.conf.tombstoneBin) {
+		if isFencedTombstone(map[string]any(rec.Record.Bins), p.conf.tombstoneBin) {
 			return p.applyNotFound(msg)
 		}
-		out := FromAerospike(map[string]any(rec.Record.Bins))
+		out := fromAerospike(map[string]any(rec.Record.Bins))
 		if m, ok := out.(map[string]any); ok {
 			// Fencing bookkeeping is not part of the record's data; leaving it
 			// in place grafts an internal field onto every enriched message.
@@ -424,7 +424,7 @@ func (p *lookupProcessor) applyResult(msg *service.Message, rec *as.BatchRecord)
 
 	default:
 		msg.SetError(fmt.Errorf("aerospike lookup failed for key %v: %s (code %d: %s)",
-			rec.Key, ExplainResultCode(rec.ResultCode), rec.ResultCode,
+			rec.Key, explainResultCode(rec.ResultCode), rec.ResultCode,
 			types.ResultCodeToString(rec.ResultCode)))
 		return resultKeep
 	}

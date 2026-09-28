@@ -36,8 +36,8 @@ func newTestWriter(t *testing.T, yaml string) *aerospikeWriter {
 	// Mirror newAerospikeOutput, so tests see the pool the pipeline would get.
 	maxInFlight, err := conf.FieldMaxInFlight()
 	require.NoError(t, err)
-	parsed.client.SizePoolForConcurrency(maxInFlight)
-	return &aerospikeWriter{conf: parsed, conn: NewConnection(parsed.client, nil)}
+	parsed.client.sizePoolForConcurrency(maxInFlight)
+	return &aerospikeWriter{conf: parsed, conn: newConnection(parsed.client, nil)}
 }
 
 // mapOne maps a single message through the batch mapper, which is how the
