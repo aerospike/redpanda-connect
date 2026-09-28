@@ -167,20 +167,20 @@ func TestEEClusterIsMultiNode(t *testing.T) {
 	assert.GreaterOrEqual(t, nsStat(t, client, eeAPNamespace, "effective_replication_factor"), int64(2)*int64(len(nodes)))
 }
 
-// TTL 120s + nsup-period 10: write, see the record, wait until NSUP drops it.
+// TTL 20s + nsup-period 10: write, see the record, wait until NSUP drops it.
 // Long enough to SELECT PK ttl-gone from as-ee-tools while the test runs.
 func TestEETTLExpiresRemovesRecord(t *testing.T) {
-	w, client := eeWriter(t, eeAPNamespace, "ttl: 120s\n")
+	w, client := eeWriter(t, eeAPNamespace, "ttl: 20s\n")
 
 	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
 		msg(t, `{"id":"ttl-gone","v":"temp"}`),
 	}))
 	rec := eeRead(t, client, eeAPNamespace, "ttl-gone")
 	require.NotNil(t, rec, "record must exist before NSUP runs")
-	assert.InDelta(t, 120, rec.Expiration, 10)
+	assert.InDelta(t, 20, rec.Expiration, 5)
 
-	// 120s TTL plus nsup-period 10, with slack so NSUP can delete it.
-	deadline := time.Now().Add(150 * time.Second)
+	// 20s TTL plus nsup-period 10, with slack so NSUP can delete it.
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		if eeRead(t, client, eeAPNamespace, "ttl-gone") == nil {
 			return

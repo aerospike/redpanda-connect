@@ -120,7 +120,7 @@ docker exec -it as-ee-tools aql --host as-ee-sec --port 3000 \
   --user rpcn --password rpcnpass
 ```
 
-For `TestEETTLExpiresRemovesRecord`, the record is `test.rpa_ee` PK `ttl-gone` with TTL **120s**. The test then waits up to **150s** for NSUP (`nsup-period 10`) to delete it. While it runs:
+For `TestEETTLExpiresRemovesRecord`, the record is `test.rpa_ee` PK `ttl-gone` with TTL **20s**. The test then waits up to **45s** for NSUP (`nsup-period 10`) to delete it. While it runs:
 
 ```bash
 docker exec as-ee-tools aql-ee -c "SELECT * FROM test.rpa_ee WHERE PK='ttl-gone'"
