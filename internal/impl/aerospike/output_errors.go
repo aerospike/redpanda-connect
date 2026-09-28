@@ -64,11 +64,11 @@ func explain(code types.ResultCode, kind opKind) string {
 			return "the record does not exist and the operation is update_only"
 		}
 	case types.KEY_BUSY:
-		return ExplainResultCode(code) + ". Enabling coalesce_batch_keys collapses repeats of a key within a batch"
+		return explainResultCode(code) + ". Enabling coalesce_batch_keys collapses repeats of a key within a batch"
 	case types.BIN_NAME_TOO_LONG:
-		return ExplainResultCode(code) + fmt.Sprintf("; rename it in the '%v' mapping", fieldBins)
+		return explainResultCode(code) + fmt.Sprintf("; rename it in the '%v' mapping", fieldBins)
 	case types.BIN_TYPE_ERROR:
-		return ExplainResultCode(code) + fmt.Sprintf("; check '%v'", fieldCoerceIntegralFloats)
+		return explainResultCode(code) + fmt.Sprintf("; check '%v'", fieldCoerceIntegralFloats)
 	}
-	return ExplainResultCode(code)
+	return explainResultCode(code)
 }

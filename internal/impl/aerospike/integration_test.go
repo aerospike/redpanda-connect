@@ -15,17 +15,25 @@
 package aerospike
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
+	"github.com/moby/moby/api/types/container"
+	mobynet "github.com/moby/moby/api/types/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -60,26 +68,49 @@ func integrationHost(t *testing.T) string {
 }
 
 // startAerospike launches a single-node community server with nsup-period set
-// so TTL writes are accepted. The client is pointed at the container IP, not a
-// mapped localhost port: Aerospike advertises that IP to the client after the
-// seed handshake, and a host-mapped port would then talk to an unreachable
-// address.
+// so TTL writes are accepted.
+//
+// The client must use a host-mapped loopback address, not the container IP.
+// Aerospike tells the client which address to use after the seed handshake;
+// advertising the docker-bridge IP works on Linux but is unreachable from
+// Docker Desktop on macOS. We pin a host port, set access-address/access-port
+// to 127.0.0.1:<that port>, and connect there so CI Ubuntu and local Docker
+// Desktop take the same path.
 func startAerospike() (string, error) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		return "", fmt.Errorf("could not locate testdata/aerospike.conf")
 	}
 	cfgPath := filepath.Join(filepath.Dir(thisFile), "testdata", "aerospike.conf")
+	baseConf, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return "", err
+	}
+
+	hostPort, err := freeHostPort()
+	if err != nil {
+		return "", err
+	}
+	cfg, err := aerospikeConfWithHostAccess(baseConf, hostPort)
+	if err != nil {
+		return "", err
+	}
 
 	// Not t.Context(): the container is shared and outlives any one test.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	ctr, err := testcontainers.Run(ctx, aerospikeImage,
+	hostPortStr := strconv.Itoa(hostPort)
+	_, err = testcontainers.Run(ctx, aerospikeImage,
 		testcontainers.WithExposedPorts(aerospikeContainerPort),
+		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) {
+			hc.PortBindings = mobynet.PortMap{
+				mobynet.MustParsePort(aerospikeContainerPort): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: hostPortStr}},
+			}
+		}),
 		testcontainers.WithCmd("--config-file", "/opt/aerospike/etc/aerospike.conf"),
 		testcontainers.WithFiles(testcontainers.ContainerFile{
-			HostFilePath:      cfgPath,
+			Reader:            bytes.NewReader(cfg),
 			ContainerFilePath: "/opt/aerospike/etc/aerospike.conf",
 			FileMode:          0o644,
 		}),
@@ -91,16 +122,60 @@ func startAerospike() (string, error) {
 		return "", err
 	}
 
-	ip, err := ctr.ContainerIP(ctx)
-	if err != nil {
-		return "", err
-	}
-	addr := net.JoinHostPort(ip, "3000")
-
+	addr := net.JoinHostPort("127.0.0.1", hostPortStr)
 	if err := waitForClient(ctx, addr); err != nil {
 		return "", err
 	}
 	return addr, nil
+}
+
+func freeHostPort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	if err := l.Close(); err != nil {
+		return 0, err
+	}
+	return port, nil
+}
+
+// servicePortLine matches the network.service port line. Heartbeat and fabric
+// use other ports, so port 3000 is unique in the config.
+var servicePortLine = regexp.MustCompile(`(?m)^([ \t]*)port[ \t]+3000[ \t]*\r?$`)
+
+func aerospikeConfWithHostAccess(base []byte, hostPort int) ([]byte, error) {
+	loc := servicePortLine.FindSubmatchIndex(base)
+	if loc == nil {
+		return nil, errors.New("testdata/aerospike.conf: missing 'port 3000' in network.service")
+	}
+	indent := string(base[loc[2]:loc[3]])
+	insert := fmt.Sprintf("\n%saccess-address 127.0.0.1\n%saccess-port %d", indent, indent, hostPort)
+
+	out := make([]byte, 0, len(base)+len(insert))
+	out = append(out, base[:loc[1]]...)
+	out = append(out, insert...)
+	return append(out, base[loc[1]:]...), nil
+}
+
+func TestAerospikeConfWithHostAccess(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	base, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "testdata", "aerospike.conf"))
+	require.NoError(t, err)
+
+	got, err := aerospikeConfWithHostAccess(base, 18412)
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "        port 3000\n        access-address 127.0.0.1\n        access-port 18412\n")
+	assert.Equal(t, 1, strings.Count(string(got), "access-address"))
+
+	got, err = aerospikeConfWithHostAccess([]byte("network {\n\tservice {\n\t\tport 3000\n\t}\n}\n"), 1)
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "\t\tport 3000\n\t\taccess-address 127.0.0.1\n\t\taccess-port 1\n")
+
+	_, err = aerospikeConfWithHostAccess([]byte("network {}\n"), 1)
+	require.Error(t, err)
 }
 
 func waitForClient(ctx context.Context, addr string) error {
