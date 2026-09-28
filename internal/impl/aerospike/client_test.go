@@ -117,7 +117,7 @@ func TestValidateBinName(t *testing.T) {
 	assert.Error(t, validateBinName(""))
 }
 
-func TestIsTombstone(t *testing.T) {
+func TestIsFencedTombstone(t *testing.T) {
 	assert.False(t, isFencedTombstone(nil, defaultTombstoneBin))
 	assert.False(t, isFencedTombstone(map[string]any{"tier": "gold"}, defaultTombstoneBin))
 	assert.False(t, isFencedTombstone(map[string]any{defaultTombstoneBin: false}, defaultTombstoneBin))
