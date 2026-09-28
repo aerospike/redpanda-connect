@@ -17,6 +17,7 @@ package aerospike
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,15 +152,18 @@ root.events = this.events.slice(0, 50)`),
 			Advanced(),
 
 		service.NewInterpolatedStringField(fieldTTL).
-			Description(`Record time-to-live. Accepts a duration such as `+"`24h`"+`, or:
+			Description(`Record time-to-live. Accepts a duration such as `+"`24h`"+`, kafka-inbound spellings (`+"`24H`"+`, `+"`1D`"+`, `+"`5M`"+`, `+"`60S`"+`, or a bare number of seconds), or:
 
-- `+"`0s`"+` — use the namespace `+"`default-ttl`"+`. Every write with this value re-bases void-time to that default.
-- `+"`never`"+` — never expire.
-- `+"`keep`"+` — leave the existing expiration untouched on update. On create, the namespace default applies.
+- `+"`0s`"+` / `+"`0`"+` — use the namespace `+"`default-ttl`"+`. Every write with this value re-bases void-time to that default.
+- `+"`never`"+` / `+"`-1`"+` — never expire.
+- `+"`keep`"+` / `+"`-2`"+` — leave the existing expiration untouched on update. On create, the namespace default applies.
+
+Units S/M/H/D are case-insensitive so existing kafka-inbound JSON (`+"`\"ttl\": \"24H\"`"+`) can be interpolated with `+"`${! json(\"ttl\") }`"+` without rewriting producers. Go durations (`+"`24h`"+`, `+"`90s`"+`) still work.
 
 The default is `+"`keep`"+` so a stream of updates does not reset or shorten void-time. Shortening TTL on an existing record can contribute to resurrection after a cold start. A positive TTL requires `+"`nsup-period`"+` greater than 0 on the target namespace, otherwise the server rejects the write and nothing ever expires.`).
 			Default("keep").
 			Example("24h").
+			Example("24H").
 			Example("never").
 			Example("keep"),
 
@@ -434,8 +438,14 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 }
 
 // parseTTL converts a configured TTL into the server's expiration encoding.
+//
+// Sentinels and Go durations (24h, 90s) are accepted. kafka-inbound payloads
+// use case-insensitive S/M/H/D and a bare number as seconds, so 24H, 1D and
+// 3600 must parse the same way without rewriting producers.
 func parseTTL(s string) (uint32, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
+	s = strings.TrimSpace(s)
+	lower := strings.ToLower(s)
+	switch lower {
 	case "", "0", "0s", "default":
 		return as.TTLServerDefault, nil
 	case "never", "-1":
@@ -444,23 +454,50 @@ func parseTTL(s string) (uint32, error) {
 		return as.TTLDontUpdate, nil
 	}
 
-	d, err := time.ParseDuration(s)
+	secs, err := parseTTLSeconds(lower)
 	if err != nil {
-		return 0, fmt.Errorf("invalid ttl %q: expected a duration, 'never' or 'keep': %w", s, err)
+		return 0, fmt.Errorf("invalid ttl %q: expected a duration, kafka-inbound unit (S/M/H/D), bare seconds, 'never' or 'keep': %w", s, err)
 	}
-	if d < 0 {
+	if secs < 0 {
 		return 0, fmt.Errorf("invalid ttl %q: must not be negative", s)
-	}
-	secs := int64(d / time.Second)
-	if d > 0 && secs == 0 {
-		// A sub-second TTL would round to "use namespace default", which is the
-		// opposite of what was asked for.
-		return 0, fmt.Errorf("invalid ttl %q: the minimum resolution is one second", s)
 	}
 	if secs >= math.MaxUint32-1 {
 		return 0, fmt.Errorf("invalid ttl %q: exceeds the maximum expiration", s)
 	}
 	return uint32(secs), nil
+}
+
+func parseTTLSeconds(lower string) (int64, error) {
+	if n, err := strconv.ParseInt(lower, 10, 64); err == nil {
+		return n, nil
+	}
+	if strings.HasSuffix(lower, "d") {
+		days, err := strconv.ParseInt(strings.TrimSuffix(lower, "d"), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid day duration")
+		}
+		if days > math.MaxInt64/86400 {
+			return 0, fmt.Errorf("exceeds the maximum expiration")
+		}
+		if days < math.MinInt64/86400 {
+			return 0, fmt.Errorf("must not be negative")
+		}
+		return days * 86400, nil
+	}
+	d, err := time.ParseDuration(lower)
+	if err != nil {
+		return 0, err
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("must not be negative")
+	}
+	secs := int64(d / time.Second)
+	if d > 0 && secs == 0 {
+		// A sub-second TTL would round to "use namespace default", which is the
+		// opposite of what was asked for.
+		return 0, fmt.Errorf("the minimum resolution is one second")
+	}
+	return secs, nil
 }
 
 // formatTTL renders a record's expiration in the form parseTTL accepts, so a

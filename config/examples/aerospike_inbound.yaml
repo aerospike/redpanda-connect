@@ -1,0 +1,84 @@
+# Sprint drop-in demo: kafka-inbound → input.redpanda + output.aerospike
+#
+# Covers:
+#   CONNECTOR-1686  JSON → Aerospike key + named bins
+#   CONNECTOR-1692  Per-topic namespace / set (switch; no Java topics.* tree)
+#   CONNECTOR-1687  TTL from JSON (24H, 1D, 5M, 60S, 3600, -1, -2, 0)
+#   CONNECTOR-1689  write / replace / delete (operation on the topic, not json("op"))
+#
+# Producers and topic JSON stay as they were for kafka-inbound. Only this YAML
+# is rewritten. Same cluster (one hosts list).
+#
+# Topics (produce JSON, then consume here):
+#   users          {"user_id":"u-42","email":"a@b.com","ttl":"24H"}
+#   payments       {"id":"p-1","amount":9.50}
+#   orders         {"user_id":"u-42"}     # delete; often key-only
+#
+# Compacted users tombstones (null body) delete when tombstone_as_delete is true.
+#
+# Run (local Redpanda :19092, Aerospike ns test, cluster-name redpanda-demo):
+#   task run CONF=./config/examples/aerospike_inbound.yaml
+#
+# Kafka broker TLS/SASL belongs on input.redpanda, not this output.
+
+http:
+  enabled: false
+
+input:
+  redpanda:
+    seed_brokers: [ "127.0.0.1:19092" ]
+    topics: [ users, payments, orders ]
+    consumer_group: aerospike-sink
+    start_from_oldest: true
+
+output:
+  switch:
+    retry_until_success: false
+    cases:
+      # 1686 + 1687 + 1689 replace: PK from JSON, bins = rest, TTL from payload
+      - check: meta("kafka_topic") == "users"
+        output:
+          aerospike:
+            hosts: [ "127.0.0.1:3000" ]
+            cluster_name: redpanda-demo
+            namespace: test
+            set: users
+            key: '${! json("user_id") }'
+            bins: 'root = this.without("user_id").without("ttl")'
+            operation: replace
+            ttl: '${! json("ttl").or("keep") }'
+            tombstone_as_delete: true
+            batching:
+              count: 10
+              period: 200ms
+
+      # 1692: set from Kafka topic name; 1689 write (merge); 1686 key = id
+      - check: meta("kafka_topic") == "payments"
+        output:
+          aerospike:
+            hosts: [ "127.0.0.1:3000" ]
+            cluster_name: redpanda-demo
+            namespace: test
+            set: '${! meta("kafka_topic") }'
+            key: '${! json("id") }'
+            bins: 'root = this.without("id")'
+            operation: write
+            ttl: keep
+            batching:
+              count: 10
+              period: 200ms
+
+      # 1689 delete: dedicated topic, same PK mapping as users. JSON unchanged.
+      - check: meta("kafka_topic") == "orders"
+        output:
+          aerospike:
+            hosts: [ "127.0.0.1:3000" ]
+            cluster_name: redpanda-demo
+            namespace: test
+            set: users
+            key: '${! json("user_id") }'
+            operation: delete
+
+logger:
+  level: INFO
+  format: logfmt

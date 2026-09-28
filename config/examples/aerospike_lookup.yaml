@@ -1,0 +1,35 @@
+# Read back records written by config/examples/aerospike_inbound.yaml.
+#
+#   task run CONF=./config/examples/aerospike_lookup.yaml
+
+http:
+  enabled: false
+
+input:
+  generate:
+    mapping: |
+      root.user_id = "user-" + counter().string()
+    interval: 0s
+    count: 20
+
+pipeline:
+  processors:
+    - aerospike_lookup:
+        hosts:
+          - 127.0.0.1:3000
+        cluster_name: redpanda-demo
+        namespace: test
+        set: users
+        key: '${! json("user_id") }'
+        not_found: error
+        emit_metadata: true
+    - log:
+        level: INFO
+        message: 'read ${! content() } gen=${! meta("aerospike_generation") }'
+
+output:
+  drop: {}
+
+logger:
+  level: INFO
+  format: logfmt

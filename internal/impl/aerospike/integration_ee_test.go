@@ -17,6 +17,7 @@ package aerospike
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,9 @@ import (
 // TLS. They need an Enterprise cluster with replication-factor 2, an AP
 // namespace `test` and a strong-consistency namespace `sc`, addressed by
 // AEROSPIKE_EE_HOSTS.
+//
+// Local 3-container setup (license key required): testdata/ee/README.md
+// (as-ee-1/2 for AEROSPIKE_EE_HOSTS, as-ee-sec for AEROSPIKE_SEC_HOST / TLS).
 const (
 	eeAPNamespace = "test"
 	eeSCNamespace = "sc"
@@ -404,6 +408,28 @@ func TestEEAuthRequiredWhenSecurityEnabled(t *testing.T) {
 	require.Error(t, w.Connect(t.Context()), "a secured cluster must refuse an unauthenticated client")
 }
 
+// go test runs with cwd = this package, so a repo-root relative CA path
+// like ./internal/impl/aerospike/testdata/ee/certs/ca.pem will not open.
+func resolveTLSCA(t *testing.T, ca string) string {
+	t.Helper()
+	candidates := []string{ca}
+	if !filepath.IsAbs(ca) {
+		trimmed := strings.TrimPrefix(strings.TrimPrefix(ca, "./"), "internal/impl/aerospike/")
+		candidates = append(candidates, trimmed, filepath.Join("testdata", "ee", "certs", "ca.pem"))
+	}
+	for _, p := range candidates {
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() {
+			continue
+		}
+		abs, err := filepath.Abs(p)
+		require.NoError(t, err)
+		return abs
+	}
+	t.Fatalf("AEROSPIKE_TLS_CA %q not found; use an absolute path (go test cwd is this package)", ca)
+	return ""
+}
+
 // TLS needs the host spec to carry the server's tls-name, which is the
 // host:tlsname:port form the connector documents.
 func TestEETLS(t *testing.T) {
@@ -412,6 +438,7 @@ func TestEETLS(t *testing.T) {
 	if host == "" || ca == "" {
 		t.Skip("AEROSPIKE_TLS_HOST/AEROSPIKE_TLS_CA unset; TLS tests need a TLS-enabled Enterprise node")
 	}
+	ca = resolveTLSCA(t, ca)
 
 	yaml := `
 hosts: [ "` + host + `" ]
