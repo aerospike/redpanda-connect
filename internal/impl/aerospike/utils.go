@@ -27,9 +27,9 @@ import (
 
 // parseTTL converts a configured TTL into the server's expiration encoding.
 //
-// Sentinels and Go durations (24h, 90s) are accepted. kafka-inbound payloads
-// use case-insensitive S/M/H/D and a bare number as seconds, so 24H, 1D and
-// 3600 must parse the same way without rewriting producers.
+// Sentinels and Go durations (24h, 90s) are accepted. S/M/H/D units are
+// case-insensitive and a bare number is seconds, so 24H, 1D and 3600 parse
+// the same way.
 func parseTTL(s string) (uint32, error) {
 	s = strings.TrimSpace(s)
 	lower := strings.ToLower(s)
@@ -44,7 +44,7 @@ func parseTTL(s string) (uint32, error) {
 
 	secs, err := parseTTLSeconds(lower)
 	if err != nil {
-		return 0, fmt.Errorf("invalid ttl %q: expected a duration, kafka-inbound unit (S/M/H/D), bare seconds, 'never' or 'keep': %w", s, err)
+		return 0, fmt.Errorf("invalid ttl %q: expected a duration, an S/M/H/D unit, bare seconds, 'never' or 'keep': %w", s, err)
 	}
 	if secs < 0 {
 		return 0, fmt.Errorf("invalid ttl %q: must not be negative", s)
@@ -76,11 +76,17 @@ func parseTTLSeconds(lower string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if d < 0 {
-		return 0, errors.New("must not be negative")
-	}
 	secs := int64(d / time.Second)
-	if d > 0 && secs == 0 {
+	if d < 0 {
+		// Leave the negative check to parseTTL so -1m and -1d share one message.
+		// A negative sub-second duration truncates to 0, which would otherwise
+		// look like "use the namespace default".
+		if secs == 0 {
+			return -1, nil
+		}
+		return secs, nil
+	}
+	if secs == 0 {
 		// A sub-second TTL would round to "use namespace default", which is the
 		// opposite of what was asked for.
 		return 0, errors.New("the minimum resolution is one second")

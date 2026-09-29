@@ -1,4 +1,5 @@
-# Read back records written by config/examples/aerospike_inbound.yaml.
+# Read back the users record written by config/examples/aerospike_inbound.yaml.
+# Produce {"user_id":"u-42","email":"a@b.com","ttl":"24H"} to the users topic first.
 #
 #   task run CONF=./config/examples/aerospike_lookup.yaml
 
@@ -8,9 +9,9 @@ http:
 input:
   generate:
     mapping: |
-      root.user_id = "user-" + counter().string()
+      root.user_id = "u-42"
     interval: 0s
-    count: 20
+    count: 1
 
 pipeline:
   processors:

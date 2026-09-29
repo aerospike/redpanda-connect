@@ -146,13 +146,13 @@ root.events = this.events.slice(0, 50)`),
 			Advanced(),
 
 		service.NewInterpolatedStringField(fieldTTL).
-			Description(`Record time-to-live. Accepts a duration such as `+"`24h`"+`, kafka-inbound spellings (`+"`24H`"+`, `+"`1D`"+`, `+"`5M`"+`, `+"`60S`"+`, or a bare number of seconds), or:
+			Description(`Record time-to-live. Accepts a duration such as `+"`24h`"+`, unit spellings (`+"`24H`"+`, `+"`1D`"+`, `+"`5M`"+`, `+"`60S`"+`, or a bare number of seconds), or:
 
 - `+"`0s`"+` / `+"`0`"+` — use the namespace `+"`default-ttl`"+`. Every write with this value re-bases void-time to that default.
 - `+"`never`"+` / `+"`-1`"+` — never expire.
 - `+"`keep`"+` / `+"`-2`"+` — leave the existing expiration untouched on update. On create, the namespace default applies.
 
-Units S/M/H/D are case-insensitive so existing kafka-inbound JSON (`+"`\"ttl\": \"24H\"`"+`) can be interpolated with `+"`${! json(\"ttl\") }`"+` without rewriting producers. Go durations (`+"`24h`"+`, `+"`90s`"+`) still work.
+Units S/M/H/D are case-insensitive, so a payload such as `+"`\"ttl\": \"24H\"`"+` can be interpolated with `+"`${! json(\"ttl\") }`"+` without rewriting producers. Go durations (`+"`24h`"+`, `+"`90s`"+`) still work.
 
 The default is `+"`keep`"+` so a stream of updates does not reset or shorten void-time. Shortening TTL on an existing record can contribute to resurrection after a cold start. A positive TTL requires `+"`nsup-period`"+` greater than 0 on the target namespace, otherwise the server rejects the write and nothing ever expires.`).
 			Default("keep").
@@ -229,7 +229,7 @@ tombstone as not found. `+"`create_only`"+` after a fenced delete fails because 
 	).
 		Example(
 			"Stream a topic into Aerospike",
-			"Consumes a Redpanda topic and writes each message as a record keyed by a JSON field, treating tombstones as deletes.",
+			"Consumes a Redpanda topic and writes each message as a record. A JSON body is keyed by user_id. A tombstone has no body, so the key is the Kafka message key and the record is deleted.",
 			`
 input:
   redpanda:
@@ -242,7 +242,7 @@ output:
     hosts: [ "localhost:3000" ]
     namespace: test
     set: users
-    key: '${! json("user_id") }'
+    key: '${! json("user_id").catch(meta("kafka_key")) }'
     bins: 'root = this.without("user_id")'
     operation: replace
     ttl: keep

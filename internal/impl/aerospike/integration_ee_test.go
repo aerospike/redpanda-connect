@@ -221,6 +221,8 @@ func TestEETTLInvalidValueIsRejected(t *testing.T) {
 }
 
 // A record written with ttl=never must survive at least one full NSUP cycle.
+// The record stays until the next test truncates this set. Storage is memory,
+// so that leftover is not durable.
 // A short-lived control record (12 s TTL) acts as a canary: once NSUP removes
 // it we know the subsystem has run and the immortal record was deliberately
 // spared. With nsup-period 10 the control is gone within 12+10=22 s worst
@@ -492,14 +494,18 @@ func TestEEAuthRequiredWhenSecurityEnabled(t *testing.T) {
 	require.Error(t, w.Connect(t.Context()), "a secured cluster must refuse an unauthenticated client")
 }
 
-// go test runs with cwd = this package, so a repo-root relative CA path
-// like ./internal/impl/aerospike/testdata/ee/certs/ca.pem will not open.
+// resolveTLSCA returns an absolute path for the CA file named by ca.
+// go test runs with this package as cwd, so a repo-root relative path is also
+// tried with the internal/impl/aerospike prefix removed. That is the same
+// file. A missing path is an error; another certificate is not substituted.
 func resolveTLSCA(t *testing.T, ca string) string {
 	t.Helper()
 	candidates := []string{ca}
 	if !filepath.IsAbs(ca) {
 		trimmed := strings.TrimPrefix(strings.TrimPrefix(ca, "./"), "internal/impl/aerospike/")
-		candidates = append(candidates, trimmed, filepath.Join("testdata", "ee", "certs", "ca.pem"))
+		if trimmed != "" && trimmed != ca && trimmed != strings.TrimPrefix(ca, "./") {
+			candidates = append(candidates, trimmed)
+		}
 	}
 	for _, p := range candidates {
 		st, err := os.Stat(p)
@@ -510,7 +516,7 @@ func resolveTLSCA(t *testing.T, ca string) string {
 		require.NoError(t, err)
 		return abs
 	}
-	t.Fatalf("AEROSPIKE_TLS_CA %q not found; use an absolute path (go test cwd is this package)", ca)
+	t.Fatalf("AEROSPIKE_TLS_CA %q not found", ca)
 	return ""
 }
 

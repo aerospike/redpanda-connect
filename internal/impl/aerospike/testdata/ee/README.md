@@ -14,8 +14,9 @@ need this stack.
 - An Aerospike **Enterprise feature-key** file (`features.conf`). Do not commit
   it. Ask a teammate or license owner for the current file.
 
-Image: `aerospike/aerospike-server-enterprise:8.1`. Docker Desktop project
-name: `aero-redpanda-ee`.
+Images: `aerospike/aerospike-server-enterprise:8.1` and
+`aerospike/aerospike-tools:8.1`. Docker Desktop project name:
+`aero-redpanda-ee`.
 
 ## What you get (4 containers)
 

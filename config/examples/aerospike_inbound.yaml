@@ -6,10 +6,11 @@
 #                  replace the record; ttl accepts 24H, 1D, 5M, 60S, 3600, -1, -2, 0
 #   payments       {"id":"p-1","amount":9.50}
 #                  merge bins; the set name is the topic name
-#   orders         {"user_id":"u-42"}
+#   user-deletes   {"user_id":"u-42"}
 #                  delete the users record with that key
 #
 # A null body on users deletes the record when tombstone_as_delete is true.
+# The Kafka message key must be the user id, because a tombstone has no JSON body.
 #
 # Run (local Redpanda :19092, Aerospike namespace test, cluster-name redpanda-demo):
 #   task run CONF=./config/examples/aerospike_inbound.yaml
@@ -22,7 +23,7 @@ http:
 input:
   redpanda:
     seed_brokers: [ "127.0.0.1:19092" ]
-    topics: [ users, payments, orders ]
+    topics: [ users, payments, user-deletes ]
     consumer_group: aerospike-sink
     # earliest = replay available records; latest = new records only;
     # committed = require a prior committed offset (Kafka auto.offset.reset=none).
@@ -32,7 +33,7 @@ output:
   switch:
     retry_until_success: false
     cases:
-      # Replace the users record. Key is user_id; remaining fields are bins. TTL comes from the payload.
+      # Replace the users record. Key is user_id, or the Kafka message key when the body is empty.
       - check: meta("kafka_topic") == "users"
         output:
           aerospike:
@@ -40,8 +41,8 @@ output:
             cluster_name: redpanda-demo
             namespace: test
             set: users
-            key: '${! json("user_id") }'
-            bins: 'root = this.without("user_id").without("ttl")'
+            key: '${! json("user_id").catch(meta("kafka_key")) }'
+            bins: 'root = this.without("user_id", "ttl")'
             operation: replace
             ttl: '${! json("ttl").or("keep") }'
             tombstone_as_delete: true
@@ -65,8 +66,8 @@ output:
               count: 10
               period: 200ms
 
-      # Delete the users record. The orders payload only needs the key.
-      - check: meta("kafka_topic") == "orders"
+      # Delete the users record. This topic carries only the key.
+      - check: meta("kafka_topic") == "user-deletes"
         output:
           aerospike:
             hosts: [ "127.0.0.1:3000" ]
