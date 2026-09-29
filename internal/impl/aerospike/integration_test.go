@@ -101,7 +101,7 @@ func startAerospike() (string, error) {
 	defer cancel()
 
 	hostPortStr := strconv.Itoa(hostPort)
-	_, err = testcontainers.Run(ctx, aerospikeImage,
+	ctr, err := testcontainers.Run(ctx, aerospikeImage,
 		testcontainers.WithExposedPorts(aerospikeContainerPort),
 		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) {
 			hc.PortBindings = mobynet.PortMap{
@@ -120,6 +120,14 @@ func startAerospike() (string, error) {
 	)
 	if err != nil {
 		return "", err
+	}
+
+	mapped, err := ctr.MappedPort(ctx, aerospikeContainerPort)
+	if err != nil {
+		return "", err
+	}
+	if mapped.Port() != hostPortStr {
+		return "", fmt.Errorf("aerospike host port: mapped %s, want %s", mapped.Port(), hostPortStr)
 	}
 
 	addr := net.JoinHostPort("127.0.0.1", hostPortStr)
@@ -426,6 +434,38 @@ func TestIntegrationTTL(t *testing.T) {
 	// Requires nsup-period > 0 on the namespace; with NSUP disabled the write
 	// would have been rejected outright.
 	assert.InDelta(t, 3600, rec.Expiration, 60)
+}
+
+func TestIntegrationTTLFromJSON(t *testing.T) {
+	w, client := outputSetup(t, "ttl: '${! json(\"ttl\") }'\n")
+
+	for _, tc := range []struct {
+		id   string
+		body string
+		want float64
+	}{
+		{id: "t24h", body: `{"id":"t24h","v":1,"ttl":"24H"}`, want: 86400},
+		{id: "t1d", body: `{"id":"t1d","v":1,"ttl":"1D"}`, want: 86400},
+		{id: "t3600", body: `{"id":"t3600","v":1,"ttl":3600}`, want: 3600},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			require.NoError(t, w.WriteBatch(t.Context(),
+				service.MessageBatch{msg(t, tc.body)}))
+			rec := outputRead(t, client, tc.id)
+			require.NotNil(t, rec)
+			assert.InDelta(t, tc.want, rec.Expiration, 60)
+		})
+	}
+}
+
+func TestIntegrationTTLRejectsInvalidJSON(t *testing.T) {
+	w, _ := outputSetup(t, "ttl: '${! json(\"ttl\") }'\n")
+
+	batch := service.MessageBatch{msg(t, `{"id":"tbad","v":1,"ttl":"24X"}`)}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "ttl")
 }
 
 func TestIntegrationReplaceClearsOldBins(t *testing.T) {

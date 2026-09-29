@@ -62,16 +62,34 @@ func TestParseTTL(t *testing.T) {
 		wantErr bool
 	}{
 		{"0s", as.TTLServerDefault, false},
+		{"0", as.TTLServerDefault, false},
 		{"", as.TTLServerDefault, false},
 		{"never", as.TTLDontExpire, false},
+		{"-1", as.TTLDontExpire, false},
 		{"keep", as.TTLDontUpdate, false},
+		{"-2", as.TTLDontUpdate, false},
 		{"24h", 86400, false},
 		{"90s", 90, false},
+		// Case-insensitive S/M/H/D units, days, and bare seconds.
+		{"24H", 86400, false},
+		{" 24H ", 86400, false},
+		{"1D", 86400, false},
+		{"1d", 86400, false},
+		{"12D", 12 * 86400, false},
+		{"5M", 300, false},
+		{"5m", 300, false},
+		{"60S", 60, false},
+		{"3600", 3600, false},
+		{"1H", 3600, false},
 		// Rounding a sub-second TTL to zero would silently mean "namespace
 		// default", which is the opposite of what was asked for.
 		{"500ms", 0, true},
 		{"-5s", 0, true},
+		{"-3", 0, true},
 		{"nonsense", 0, true},
+		{"1 d", 0, true},
+		{"24X", 0, true},
+		{"-1m", 0, true},
 	}
 
 	for _, tc := range tests {
@@ -85,6 +103,43 @@ func TestParseTTL(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestParseTTLNegativeUnitsShareOneError(t *testing.T) {
+	dayErr := requireParseTTLError(t, "-1d")
+	minuteErr := requireParseTTLError(t, "-1m")
+	assert.Equal(t, `invalid ttl "-1d": must not be negative`, dayErr)
+	assert.Equal(t, `invalid ttl "-1m": must not be negative`, minuteErr)
+}
+
+func requireParseTTLError(t *testing.T, in string) string {
+	t.Helper()
+	_, err := parseTTL(in)
+	require.Error(t, err)
+	return err.Error()
+}
+
+func TestMapMessageTTLUnits(t *testing.T) {
+	w := newTestWriter(t, baseConfig+"\nttl: '${! json(\"ttl\") }'\n")
+
+	msg := service.NewMessage([]byte(`{"id":"u1","name":"Ada","ttl":"24H"}`))
+	op, err := mapOne(t, w, msg)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(86400), op.ttl)
+
+	msg = service.NewMessage([]byte(`{"id":"u1","name":"Ada","ttl":3600}`))
+	op, err = mapOne(t, w, msg)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(3600), op.ttl)
+}
+
+func TestMapMessageTTLUnitsRejectsInvalid(t *testing.T) {
+	w := newTestWriter(t, baseConfig+"\nttl: '${! json(\"ttl\") }'\n")
+
+	msg := service.NewMessage([]byte(`{"id":"u1","name":"Ada","ttl":"24X"}`))
+	_, err := mapOne(t, w, msg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ttl")
 }
 
 func TestParseOpKind(t *testing.T) {
@@ -130,6 +185,33 @@ func TestMapMessageRejectsLongBinName(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds the Aerospike limit of 15")
+}
+
+func TestMapMessageTombstoneUsesKafkaKey(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+key: '${! json("user_id").catch(meta("kafka_key")) }'
+bins: 'root = this.without("user_id", "ttl")'
+operation: replace
+ttl: '${! json("ttl").or("keep") }'
+tombstone_as_delete: true
+`)
+
+	tombstone := service.NewMessage([]byte(``))
+	tombstone.MetaSet("kafka_key", "u-42")
+	op, err := mapOne(t, w, tombstone)
+	require.NoError(t, err)
+	assert.Equal(t, opDelete, op.kind)
+	assert.Equal(t, "u-42", op.key.Value().GetObject())
+
+	body := msg(t, `{"user_id":"u-42","email":"a@b.com","ttl":"24H"}`)
+	body.MetaSet("kafka_key", "other")
+	op, err = mapOne(t, w, body)
+	require.NoError(t, err)
+	assert.Equal(t, opReplace, op.kind)
+	assert.Equal(t, "u-42", op.key.Value().GetObject())
 }
 
 func TestMapMessageTombstoneBecomesDelete(t *testing.T) {

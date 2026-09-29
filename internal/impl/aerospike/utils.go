@@ -15,8 +15,10 @@
 package aerospike
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,8 +26,14 @@ import (
 )
 
 // parseTTL converts a configured TTL into the server's expiration encoding.
+//
+// Sentinels and Go durations (24h, 90s) are accepted. S/M/H/D units are
+// case-insensitive and a bare number is seconds, so 24H, 1D and 3600 parse
+// the same way.
 func parseTTL(s string) (uint32, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
+	s = strings.TrimSpace(s)
+	lower := strings.ToLower(s)
+	switch lower {
 	case "", "0", "0s", "default":
 		return as.TTLServerDefault, nil
 	case "never", "-1":
@@ -34,23 +42,56 @@ func parseTTL(s string) (uint32, error) {
 		return as.TTLDontUpdate, nil
 	}
 
-	d, err := time.ParseDuration(s)
+	secs, err := parseTTLSeconds(lower)
 	if err != nil {
-		return 0, fmt.Errorf("invalid ttl %q: expected a duration, 'never' or 'keep': %w", s, err)
+		return 0, fmt.Errorf("invalid ttl %q: expected a duration, an S/M/H/D unit, bare seconds, 'never' or 'keep': %w", s, err)
 	}
-	if d < 0 {
+	if secs < 0 {
 		return 0, fmt.Errorf("invalid ttl %q: must not be negative", s)
-	}
-	secs := int64(d / time.Second)
-	if d > 0 && secs == 0 {
-		// A sub-second TTL would round to "use namespace default", which is the
-		// opposite of what was asked for.
-		return 0, fmt.Errorf("invalid ttl %q: the minimum resolution is one second", s)
 	}
 	if secs >= math.MaxUint32-1 {
 		return 0, fmt.Errorf("invalid ttl %q: exceeds the maximum expiration", s)
 	}
 	return uint32(secs), nil
+}
+
+func parseTTLSeconds(lower string) (int64, error) {
+	if n, err := strconv.ParseInt(lower, 10, 64); err == nil {
+		return n, nil
+	}
+	if daysStr, ok := strings.CutSuffix(lower, "d"); ok {
+		days, err := strconv.ParseInt(daysStr, 10, 64)
+		if err != nil {
+			return 0, errors.New("invalid day duration")
+		}
+		if days > math.MaxInt64/86400 {
+			return 0, errors.New("exceeds the maximum expiration")
+		}
+		if days < math.MinInt64/86400 {
+			return 0, errors.New("must not be negative")
+		}
+		return days * 86400, nil
+	}
+	d, err := time.ParseDuration(lower)
+	if err != nil {
+		return 0, err
+	}
+	secs := int64(d / time.Second)
+	if d < 0 {
+		// Leave the negative check to parseTTL so -1m and -1d share one message.
+		// A negative sub-second duration truncates to 0, which would otherwise
+		// look like "use the namespace default".
+		if secs == 0 {
+			return -1, nil
+		}
+		return secs, nil
+	}
+	if secs == 0 {
+		// A sub-second TTL would round to "use namespace default", which is the
+		// opposite of what was asked for.
+		return 0, errors.New("the minimum resolution is one second")
+	}
+	return secs, nil
 }
 
 // formatTTL renders a record's expiration in the form parseTTL accepts, so a
