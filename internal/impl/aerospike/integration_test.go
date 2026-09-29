@@ -443,6 +443,78 @@ func TestIntegrationReplaceClearsOldBins(t *testing.T) {
 	assert.NotContains(t, rec.Bins, "b", "replace must drop bins not named in the write")
 }
 
+// TestIntegrationWriteKeepsExistingBins proves write merges across batches:
+// a later message adds a bin and leaves bins from the earlier write in place.
+func TestIntegrationWriteKeepsExistingBins(t *testing.T) {
+	w, client := outputSetup(t, "operation: write\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"m1","a":1}`)}))
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"m1","b":2}`)}))
+
+	rec := outputRead(t, client, "m1")
+	require.NotNil(t, rec)
+	assert.Equal(t, 1, rec.Bins["a"])
+	assert.Equal(t, 2, rec.Bins["b"])
+}
+
+// TestIntegrationDeleteKeyOnly deletes from a JSON body that carries only the
+// key. A second delete of that missing key must succeed so a redelivery is not
+// nacked forever.
+func TestIntegrationDeleteKeyOnly(t *testing.T) {
+	w, client := outputSetup(t, "")
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"dk1","email":"a@b.com"}`)}))
+	require.NotNil(t, outputRead(t, client, "dk1"))
+
+	del := newTestWriter(t, `
+hosts: [ "`+integrationHost(t)+`" ]
+namespace: `+integrationNamespace+`
+set: `+integrationOutputSet+`
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+operation: delete
+`)
+	require.NoError(t, del.Connect(t.Context()))
+	t.Cleanup(func() { _ = del.Close(context.Background()) })
+
+	require.NoError(t, del.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"dk1"}`)}))
+	assert.Nil(t, outputRead(t, client, "dk1"))
+
+	require.NoError(t, del.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"dk1"}`)}))
+}
+
+func TestIntegrationCreateOnlyFailsWhenExists(t *testing.T) {
+	w, client := outputSetup(t, "operation: create_only\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"co1","a":1}`)}))
+
+	again := service.MessageBatch{msg(t, `{"id":"co1","a":2}`)}
+	indexer := again.Index()
+	err := w.WriteBatch(t.Context(), again)
+	require.Error(t, err)
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "create_only")
+
+	rec := outputRead(t, client, "co1")
+	require.NotNil(t, rec)
+	assert.Equal(t, 1, rec.Bins["a"], "the failed create_only must not overwrite the record")
+}
+
+func TestIntegrationUpdateOnlyFailsWhenMissing(t *testing.T) {
+	w, client := outputSetup(t, "operation: update_only\n")
+
+	batch := service.MessageBatch{msg(t, `{"id":"uo1","a":1}`)}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "update_only")
+	assert.Nil(t, outputRead(t, client, "uo1"))
+}
+
 func TestIntegrationPartialFailure(t *testing.T) {
 	w, client := outputSetup(t, "")
 
