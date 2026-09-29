@@ -1,22 +1,17 @@
-# Sprint drop-in demo: kafka-inbound → input.redpanda + output.aerospike
+# Consume Redpanda topics and write each one to Aerospike.
+# The operation is chosen per topic. The message JSON does not carry an operation.
 #
-# Covers:
-#   CONNECTOR-1686  JSON → Aerospike key + named bins
-#   CONNECTOR-1692  Per-topic namespace / set (switch; no Java topics.* tree)
-#   CONNECTOR-1687  TTL from JSON (24H, 1D, 5M, 60S, 3600, -1, -2, 0)
-#   CONNECTOR-1689  write / replace / delete (operation on the topic, not json("op"))
-#
-# Producers and topic JSON stay as they were for kafka-inbound. Only this YAML
-# is rewritten. Same cluster (one hosts list).
-#
-# Topics (produce JSON, then consume here):
+# Topics:
 #   users          {"user_id":"u-42","email":"a@b.com","ttl":"24H"}
+#                  replace the record; ttl accepts 24H, 1D, 5M, 60S, 3600, -1, -2, 0
 #   payments       {"id":"p-1","amount":9.50}
-#   orders         {"user_id":"u-42"}     # delete; often key-only
+#                  merge bins; the set name is the topic name
+#   orders         {"user_id":"u-42"}
+#                  delete the users record with that key
 #
-# Compacted users tombstones (null body) delete when tombstone_as_delete is true.
+# A null body on users deletes the record when tombstone_as_delete is true.
 #
-# Run (local Redpanda :19092, Aerospike ns test, cluster-name redpanda-demo):
+# Run (local Redpanda :19092, Aerospike namespace test, cluster-name redpanda-demo):
 #   task run CONF=./config/examples/aerospike_inbound.yaml
 #
 # Kafka broker TLS/SASL belongs on input.redpanda, not this output.
@@ -37,7 +32,7 @@ output:
   switch:
     retry_until_success: false
     cases:
-      # 1686 + 1687 + 1689 replace: PK from JSON, bins = rest, TTL from payload
+      # Replace the users record. Key is user_id; remaining fields are bins. TTL comes from the payload.
       - check: meta("kafka_topic") == "users"
         output:
           aerospike:
@@ -54,7 +49,7 @@ output:
               count: 10
               period: 200ms
 
-      # 1692: set from Kafka topic name; 1689 write (merge); 1686 key = id
+      # Merge bins into the payments set. The set name is the topic name. Key is id.
       - check: meta("kafka_topic") == "payments"
         output:
           aerospike:
@@ -70,7 +65,7 @@ output:
               count: 10
               period: 200ms
 
-      # 1689 delete: dedicated topic, same PK mapping as users. JSON unchanged.
+      # Delete the users record. The orders payload only needs the key.
       - check: meta("kafka_topic") == "orders"
         output:
           aerospike:
