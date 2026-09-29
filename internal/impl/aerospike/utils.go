@@ -15,6 +15,7 @@
 package aerospike
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -58,16 +59,16 @@ func parseTTLSeconds(lower string) (int64, error) {
 	if n, err := strconv.ParseInt(lower, 10, 64); err == nil {
 		return n, nil
 	}
-	if strings.HasSuffix(lower, "d") {
-		days, err := strconv.ParseInt(strings.TrimSuffix(lower, "d"), 10, 64)
+	if daysStr, ok := strings.CutSuffix(lower, "d"); ok {
+		days, err := strconv.ParseInt(daysStr, 10, 64)
 		if err != nil {
-			return 0, fmt.Errorf("invalid day duration")
+			return 0, errors.New("invalid day duration")
 		}
 		if days > math.MaxInt64/86400 {
-			return 0, fmt.Errorf("exceeds the maximum expiration")
+			return 0, errors.New("exceeds the maximum expiration")
 		}
 		if days < math.MinInt64/86400 {
-			return 0, fmt.Errorf("must not be negative")
+			return 0, errors.New("must not be negative")
 		}
 		return days * 86400, nil
 	}
@@ -76,13 +77,13 @@ func parseTTLSeconds(lower string) (int64, error) {
 		return 0, err
 	}
 	if d < 0 {
-		return 0, fmt.Errorf("must not be negative")
+		return 0, errors.New("must not be negative")
 	}
 	secs := int64(d / time.Second)
 	if d > 0 && secs == 0 {
 		// A sub-second TTL would round to "use namespace default", which is the
 		// opposite of what was asked for.
-		return 0, fmt.Errorf("the minimum resolution is one second")
+		return 0, errors.New("the minimum resolution is one second")
 	}
 	return secs, nil
 }
