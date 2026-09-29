@@ -29,7 +29,9 @@ input:
     seed_brokers: [ "127.0.0.1:19092" ]
     topics: [ users, payments, orders ]
     consumer_group: aerospike-sink
-    start_from_oldest: true
+    # earliest = replay available records; latest = new records only;
+    # committed = require a prior committed offset (Kafka auto.offset.reset=none).
+    start_offset: earliest
 
 output:
   switch:
