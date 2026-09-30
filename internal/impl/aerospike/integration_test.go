@@ -322,6 +322,79 @@ func TestIntegrationCoalescing(t *testing.T) {
 	assert.NotNil(t, outputRead(t, client, "c2"))
 }
 
+// TestIntegrationCoalesceDisjointBins proves two messages for one key in the
+// same batch, with no bin names in common, become one record that has both
+// sets of bins.
+func TestIntegrationCoalesceDisjointBins(t *testing.T) {
+	w, client := outputSetup(t, "")
+
+	batch := service.MessageBatch{
+		msg(t, `{"id":"c3","a":1,"b":2}`),
+		msg(t, `{"id":"c3","c":3,"d":4}`),
+	}
+	require.NoError(t, w.WriteBatch(t.Context(), batch))
+
+	rec := outputRead(t, client, "c3")
+	require.NotNil(t, rec)
+	assert.Equal(t, 1, rec.Bins["a"])
+	assert.Equal(t, 2, rec.Bins["b"])
+	assert.Equal(t, 3, rec.Bins["c"])
+	assert.Equal(t, 4, rec.Bins["d"])
+	assert.NotContains(t, rec.Bins, "id")
+}
+
+// TestIntegrationSameKeyAcrossBatches locks the boundary between batches.
+// Messages in different WriteBatch calls are not folded. A later write keeps
+// bins from the earlier batch. A later delete removes the record. The same
+// write-then-delete pair inside one batch must not leave the record, because
+// that pair is folded into a single delete.
+func TestIntegrationSameKeyAcrossBatches(t *testing.T) {
+	w, client := outputSetup(t, "operation: '${! meta(\"op\") }'\n")
+
+	t.Run("later write keeps bins from the earlier batch", func(t *testing.T) {
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"x1","a":1,"b":2}`),
+		}))
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"x1","c":3,"d":4}`),
+		}))
+
+		rec := outputRead(t, client, "x1")
+		require.NotNil(t, rec)
+		assert.Equal(t, 1, rec.Bins["a"])
+		assert.Equal(t, 2, rec.Bins["b"])
+		assert.Equal(t, 3, rec.Bins["c"])
+		assert.Equal(t, 4, rec.Bins["d"])
+	})
+
+	t.Run("later delete removes the record", func(t *testing.T) {
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"x2","a":1,"b":2}`),
+		}))
+		require.NotNil(t, outputRead(t, client, "x2"))
+
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "delete", `{"id":"x2"}`),
+		}))
+		assert.Nil(t, outputRead(t, client, "x2"))
+	})
+
+	t.Run("write then delete in one batch leaves nothing", func(t *testing.T) {
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"x3","a":1,"b":2}`),
+			opMsg(t, "delete", `{"id":"x3"}`),
+		}))
+		assert.Nil(t, outputRead(t, client, "x3"))
+	})
+}
+
+func opMsg(t *testing.T, op, body string) *service.Message {
+	t.Helper()
+	m := msg(t, body)
+	m.MetaSet("op", op)
+	return m
+}
+
 func TestIntegrationTombstoneDeletes(t *testing.T) {
 	w, client := outputSetup(t, `
 key: '${! meta("k") }'
