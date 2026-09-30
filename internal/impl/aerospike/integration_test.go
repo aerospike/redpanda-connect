@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -457,6 +458,207 @@ func TestIntegrationWriteKeepsExistingBins(t *testing.T) {
 	require.NotNil(t, rec)
 	assert.Equal(t, 1, rec.Bins["a"])
 	assert.Equal(t, 2, rec.Bins["b"])
+}
+
+// TestIntegrationWriteAndUpdateNestedJSON stores lists, maps, and nested
+// collections as bins, then updates the record. update merges whole bins:
+// bins absent from the second message stay, including their nested values.
+func TestIntegrationWriteAndUpdateNestedJSON(t *testing.T) {
+	const created = `{
+		"id": "user-1001",
+		"name": "SomeName",
+		"addresses": [
+			{"type": "home", "city": "Bangalore", "state": "Karnataka", "zip": 560001, "location": {"lat": 12.9716, "lon": 77.5946}},
+			{"type": "office", "city": "Chennai", "state": "Tamil Nadu", "zip": 600001, "location": {"lat": 13.0827, "lon": 80.2707}}
+		],
+		"single_map": {"name": "primary", "value": "test-value"},
+		"simple_list": ["red", "green", "blue"],
+		"list_of_lists": [[1, 2, 3], [10, 20, 30], [100, 200, 300]],
+		"map_of_maps": {
+			"personal": {"email": "test@example.com", "phone": "9999999999"},
+			"work": {"company": "Aerospike", "role": "Engineer"}
+		},
+		"complex_map": {
+			"profile": {"first_name": "SomeName", "last_name": "M"},
+			"skills": ["Aerospike", "Kafka", "Java"],
+			"projects": [
+				{"name": "project-a", "status": "active", "technologies": ["Kafka", "Aerospike"]},
+				{"name": "project-b", "status": "completed", "technologies": ["Python", "Docker"]}
+			]
+		}
+	}`
+
+	w, client := outputSetup(t, "operation: write\n")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, created)}))
+
+	rec := outputRead(t, client, "user-1001")
+	require.NotNil(t, rec)
+	assert.NotContains(t, rec.Bins, "id")
+	assertNestedBins(t, rec.Bins, map[string]any{
+		"name": "SomeName",
+		"addresses": []any{
+			map[string]any{"type": "home", "city": "Bangalore", "state": "Karnataka", "zip": 560001, "location": map[string]any{"lat": 12.9716, "lon": 77.5946}},
+			map[string]any{"type": "office", "city": "Chennai", "state": "Tamil Nadu", "zip": 600001, "location": map[string]any{"lat": 13.0827, "lon": 80.2707}},
+		},
+		"single_map":    map[string]any{"name": "primary", "value": "test-value"},
+		"simple_list":   []any{"red", "green", "blue"},
+		"list_of_lists": []any{[]any{1, 2, 3}, []any{10, 20, 30}, []any{100, 200, 300}},
+		"map_of_maps": map[string]any{
+			"personal": map[string]any{"email": "test@example.com", "phone": "9999999999"},
+			"work":     map[string]any{"company": "Aerospike", "role": "Engineer"},
+		},
+		"complex_map": map[string]any{
+			"profile": map[string]any{"first_name": "SomeName", "last_name": "M"},
+			"skills":  []any{"Aerospike", "Kafka", "Java"},
+			"projects": []any{
+				map[string]any{"name": "project-a", "status": "active", "technologies": []any{"Kafka", "Aerospike"}},
+				map[string]any{"name": "project-b", "status": "completed", "technologies": []any{"Python", "Docker"}},
+			},
+		},
+	})
+
+	upd := newTestWriter(t, `
+hosts: [ "`+integrationHost(t)+`" ]
+namespace: `+integrationNamespace+`
+set: `+integrationOutputSet+`
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+operation: update
+`)
+	require.NoError(t, upd.Connect(t.Context()))
+	t.Cleanup(func() { _ = upd.Close(context.Background()) })
+
+	require.NoError(t, upd.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"user-1001","name":"SomeName M","simple_list":["red","green","blue","yellow"]}`),
+	}))
+
+	rec = outputRead(t, client, "user-1001")
+	require.NotNil(t, rec)
+	assert.Equal(t, "SomeName M", rec.Bins["name"])
+	assert.Equal(t, []any{"red", "green", "blue", "yellow"}, rec.Bins["simple_list"])
+	assert.Equal(t, "Bangalore", nestedString(t, rec.Bins["addresses"], 0, "city"))
+	assert.Equal(t, "Aerospike", nestedString(t, rec.Bins["map_of_maps"], "work", "company"))
+}
+
+// TestIntegrationNestedBinVariations checks three JSON shapes on their own.
+// The field name is the bin name. A later write to the same key replaces only
+// the bins present in that message.
+func TestIntegrationNestedBinVariations(t *testing.T) {
+	w, client := outputSetup(t, "operation: write\n")
+
+	tests := []struct {
+		name   string
+		id     string
+		write  string
+		update string
+		want   map[string]any
+	}{
+		{
+			name:   "string list",
+			id:     "colors",
+			write:  `{"id":"colors","label":"paint","simple_list":["red","green","blue"]}`,
+			update: `{"id":"colors","simple_list":["red","green","blue","yellow"]}`,
+			want: map[string]any{
+				"label":       "paint",
+				"simple_list": []any{"red", "green", "blue", "yellow"},
+			},
+		},
+		{
+			name:   "list of maps",
+			id:     "places",
+			write:  `{"id":"places","city":"Bangalore","addresses":[{"type":"home","zip":560001},{"type":"office","zip":600001}]}`,
+			update: `{"id":"places","addresses":[{"type":"office","zip":600001}]}`,
+			want: map[string]any{
+				"city":      "Bangalore",
+				"addresses": []any{map[string]any{"type": "office", "zip": 600001}},
+			},
+		},
+		{
+			name:   "map of lists",
+			id:     "groups",
+			write:  `{"id":"groups","label":"sets","groups":{"colors":["red","green"],"nums":[1,2,3]}}`,
+			update: `{"id":"groups","label":"updated"}`,
+			want: map[string]any{
+				"label": "updated",
+				"groups": map[string]any{
+					"colors": []any{"red", "green"},
+					"nums":   []any{1, 2, 3},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, tc.write)}))
+			require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, tc.update)}))
+
+			rec := outputRead(t, client, tc.id)
+			require.NotNil(t, rec)
+			assert.NotContains(t, rec.Bins, "id")
+			assertNestedBins(t, rec.Bins, tc.want)
+		})
+	}
+}
+
+func assertNestedBins(t *testing.T, got map[string]any, want map[string]any) {
+	t.Helper()
+	assert.Equal(t, normalizeAerospike(want), normalizeAerospike(got))
+}
+
+func nestedString(t *testing.T, v any, path ...any) string {
+	t.Helper()
+	cur := normalizeAerospike(v)
+	for _, p := range path {
+		switch key := p.(type) {
+		case int:
+			cur = cur.([]any)[key]
+		case string:
+			cur = cur.(map[string]any)[key]
+		}
+	}
+	s, ok := cur.(string)
+	require.True(t, ok, "expected string at %v, got %T", path, cur)
+	return s
+}
+
+// normalizeAerospike makes server CDTs comparable to the JSON we wrote.
+// The client returns map keys as interface{} and integers in a few widths.
+func normalizeAerospike(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[k] = normalizeAerospike(val)
+		}
+		return out
+	case map[any]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[fmt.Sprint(k)] = normalizeAerospike(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = normalizeAerospike(val)
+		}
+		return out
+	case int:
+		return t
+	case int64:
+		if t >= math.MinInt && t <= math.MaxInt {
+			return int(t)
+		}
+		return t
+	case float64:
+		if t == math.Trunc(t) && t >= math.MinInt && t <= math.MaxInt {
+			return int(t)
+		}
+		return t
+	default:
+		return v
+	}
 }
 
 // TestIntegrationDeleteKeyOnly deletes from a JSON body that carries only the
