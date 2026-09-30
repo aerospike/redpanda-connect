@@ -343,6 +343,26 @@ func TestIntegrationCoalesceDisjointBins(t *testing.T) {
 	assert.NotContains(t, rec.Bins, "id")
 }
 
+// TestIntegrationBinNamesAreCaseSensitive proves a bin name keeps its case.
+// "tier" and "Tier" are two bins, and the same spelling difference inside a
+// map bin is two map keys.
+func TestIntegrationBinNamesAreCaseSensitive(t *testing.T) {
+	w, client := outputSetup(t, "")
+
+	batch := service.MessageBatch{
+		msg(t, `{"id":"case1","tier":"gold","Tier":"silver","prefs":{"theme":"dark","Theme":"light"}}`),
+	}
+	require.NoError(t, w.WriteBatch(t.Context(), batch))
+
+	rec := outputRead(t, client, "case1")
+	require.NotNil(t, rec)
+	assertNestedBins(t, rec.Bins, map[string]any{
+		"tier":  "gold",
+		"Tier":  "silver",
+		"prefs": map[string]any{"theme": "dark", "Theme": "light"},
+	})
+}
+
 // TestIntegrationSameKeyAcrossBatches locks the boundary between batches.
 // Messages in different WriteBatch calls are not folded. A later write keeps
 // bins from the earlier batch. A later delete removes the record. The same
