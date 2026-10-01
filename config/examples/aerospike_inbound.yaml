@@ -1,0 +1,30 @@
+# Drop-in for the Aerospike Kafka inbound connector's key-field + bins mapping.
+# Producers and JSON stay the same; only this pipeline changes.
+#
+# Message on topic "users":
+#   {"user_id": "u-42", "email": "a@b.com", "plan": "pro"}
+#
+# Record: namespace test, set users, key u-42, bins {email, plan}.
+# The primary key is not stored again as a bin.
+#
+# Compacted topic, primary key = Kafka record key:
+#   key: '${! meta("kafka_key") }'
+#   bins: 'root = this'
+
+input:
+  redpanda:
+    seed_brokers: [ "localhost:19092" ]
+    topics: [ "users" ]
+    consumer_group: "aerospike-sink"
+
+output:
+  aerospike:
+    hosts: [ "localhost:3000" ]
+    namespace: test
+    set: users
+    key: '${! json("user_id") }'
+    bins: 'root = this.without("user_id")'
+    operation: replace
+    batching:
+      count: 500
+      period: 1s

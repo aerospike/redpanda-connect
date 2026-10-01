@@ -319,6 +319,10 @@ func TestValidateNamespaceName(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty")
 
+	err = validateNamespaceName("null")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "null")
+
 	err = validateNamespaceName(strings.Repeat("n", maxNamespaceNameLen+1))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds the Aerospike limit of 31")
@@ -428,6 +432,19 @@ key: '${! json("id") }'
 `, msg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "colon")
+}
+
+func TestKeyRejectsNullSetName(t *testing.T) {
+	msg := service.NewMessage([]byte(`{"id":"u1"}`))
+	msg.MetaSet("set", "null")
+
+	_, err := resolveKey(t, `
+namespace: test
+set: '${! meta("set") }'
+key: '${! json("id") }'
+`, msg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "null")
 }
 
 func TestKeyAllowsEmptySet(t *testing.T) {

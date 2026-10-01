@@ -552,7 +552,7 @@ password: ${KEY_PASSWORD}
 
 === `namespace`
 
-The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime.
+The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime. A resolved value of `null` is rejected, because a missing interpolated field stringifies to that.
 This field supports xref:configuration:interpolation.adoc#bloblang-queries[interpolation functions].
 
 
@@ -569,7 +569,7 @@ namespace: ${! meta("as_namespace") }
 
 === `set`
 
-The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value such as a Kafka topic name. Leave empty for the null set.
+The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value such as a Kafka topic name. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.
 This field supports xref:configuration:interpolation.adoc#bloblang-queries[interpolation functions].
 
 
@@ -604,7 +604,7 @@ key: ${! meta("kafka_key") }
 
 === `key_type`
 
-How to interpret the resolved `key`. Aerospike addresses records by a digest of the key, and the digest differs between a string `"123"` and an integer `123` — so this must match whatever else reads or writes these records.
+How to interpret the resolved `key`. Aerospike addresses records by a digest of the key, and the digest differs between a string `"123"` and an integer `123`. This must match whatever else reads or writes these records.
 
 
 *Type*: `string`
