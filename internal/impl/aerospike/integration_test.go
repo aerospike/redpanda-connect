@@ -44,7 +44,7 @@ import (
 )
 
 const (
-	aerospikeImage         = "aerospike/aerospike-server:8.1"
+	aerospikeImage         = "aerospike/aerospike-server:8.2"
 	integrationNamespace   = "test"
 	integrationOutputSet   = "rpa_e2e"
 	integrationLookupSet   = "rpa_lookup"
@@ -296,6 +296,27 @@ func TestIntegrationWriteAndRead(t *testing.T) {
 	assert.Equal(t, 10, rec.Bins["score"])
 	assert.Equal(t, 0.5, rec.Bins["ratio"])
 	assert.Equal(t, []any{"x", "y"}, rec.Bins["tags"])
+}
+
+// TestIntegrationJSONUserRecord is the kafka-inbound key-field + bins case:
+// a JSON object becomes one record whose primary key is user_id and whose
+// bins are the remaining fields.
+func TestIntegrationJSONUserRecord(t *testing.T) {
+	w, client := outputSetup(t, `
+key: '${! json("user_id") }'
+bins: 'root = this.without("user_id")'
+operation: replace
+`)
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"user_id":"u-42","email":"a@b.com","plan":"pro"}`),
+	}))
+
+	rec := outputRead(t, client, "u-42")
+	require.NotNil(t, rec)
+	assert.Equal(t, "a@b.com", rec.Bins["email"])
+	assert.Equal(t, "pro", rec.Bins["plan"])
+	assert.NotContains(t, rec.Bins, "user_id")
 }
 
 // TestIntegrationCoalescing proves the merge rules against a real server: three

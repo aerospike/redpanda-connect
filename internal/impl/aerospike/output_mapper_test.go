@@ -181,6 +181,26 @@ bins: 'root = this.without("id", "op")'
 	assert.Equal(t, opWrite, upd.kind)
 }
 
+func TestMapMessageJSONUserRecord(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+key: '${! json("user_id") }'
+bins: 'root = this.without("user_id")'
+operation: replace
+`)
+
+	op, err := mapOne(t, w, service.NewMessage([]byte(`{"user_id":"u-42","email":"a@b.com","plan":"pro"}`)))
+	require.NoError(t, err)
+	assert.Equal(t, "u-42", op.key.Value().GetObject())
+	assert.Equal(t, "test", op.key.Namespace())
+	assert.Equal(t, "users", op.key.SetName())
+	assert.Equal(t, opReplace, op.kind)
+	assert.Equal(t, map[string]any{"email": "a@b.com", "plan": "pro"}, op.bins)
+	assert.NotContains(t, op.bins, "user_id")
+}
+
 func TestMapMessageIntKeyType(t *testing.T) {
 	w := newTestWriter(t, `
 hosts: [ "localhost:3000" ]
