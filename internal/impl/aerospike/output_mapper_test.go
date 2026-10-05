@@ -81,8 +81,13 @@ func TestParseTTL(t *testing.T) {
 		{"60S", 60, false},
 		{"3600", 3600, false},
 		{"1H", 3600, false},
-		// Rounding a sub-second TTL to zero would silently mean "namespace
-		// default", which is the opposite of what was asked for.
+		// A zero duration is the namespace default, including a unit and -0s.
+		{"0m", as.TTLServerDefault, false},
+		{"0H", as.TTLServerDefault, false},
+		{"0ms", as.TTLServerDefault, false},
+		{"-0s", as.TTLServerDefault, false},
+		// Rounding a positive sub-second TTL to zero would silently mean
+		// "namespace default", which is the opposite of what was asked for.
 		{"500ms", 0, true},
 		{"-5s", 0, true},
 		{"-3", 0, true},

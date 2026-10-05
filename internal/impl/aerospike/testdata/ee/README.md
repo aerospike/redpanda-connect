@@ -15,7 +15,8 @@ need this stack.
   it. Ask a teammate or license owner for the current file.
 
 Images: `aerospike/aerospike-server-enterprise:8.1` and
-`aerospike/aerospike-tools:8.1`. Docker Desktop project name:
+`aerospike/aerospike-tools:13.1.0`. The tools image uses its own version
+line, not the server's. Docker Desktop project name:
 `aero-redpanda-ee`.
 
 ## What you get (4 containers)
@@ -137,8 +138,9 @@ docker exec -it as-ee-sec asadm -U admin -P '<admin-password>' --enable \
   -e "manage acl create user rpcn password rpcnpass roles read-write sys-admin"
 ```
 
-If `TestEEStrongConsistency` fails, wait for both unsecured nodes then restage
-the `sc` roster:
+If `TestEEStrongConsistency` fails with `not connected`, the `sc` roster is
+naming node ids from a previous start. Wait for both unsecured nodes, then
+restage it onto the nodes that are up now:
 
 ```bash
 docker exec as-ee-1 asinfo -v statistics | tr ';' '\n' | grep cluster_size

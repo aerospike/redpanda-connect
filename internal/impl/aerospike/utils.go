@@ -86,9 +86,10 @@ func parseTTLSeconds(lower string) (int64, error) {
 		}
 		return secs, nil
 	}
-	if secs == 0 {
-		// A sub-second TTL would round to "use namespace default", which is the
-		// opposite of what was asked for.
+	if d > 0 && secs == 0 {
+		// A positive sub-second TTL would round to "use namespace default",
+		// which is the opposite of what was asked for. A zero duration such as
+		// 0m or 0H is the namespace default and must pass through.
 		return 0, errors.New("the minimum resolution is one second")
 	}
 	return secs, nil

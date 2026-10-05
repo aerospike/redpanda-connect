@@ -54,24 +54,38 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 
+# A non-null roster is not enough. After a container restart the namespace can
+# still name the previous node ids, and strong-consistency writes then fail
+# until the roster is restaged onto the nodes that are actually up.
+node_set() {
+  printf '%s' "$1" | tr ',' '\n' | sed '/^$/d;/^null$/d' | sort -u | paste -sd, - || true
+}
+
 echo "staging SC roster on namespace sc ..."
 ready=0
 for _ in $(seq 1 30); do
   roster="$(docker exec as-ee-1 asinfo -v 'roster:namespace=sc' 2>/dev/null || true)"
-  if [[ "$roster" == roster=* && "$roster" != roster=null* ]]; then
+  roster_nodes="${roster#roster=}"
+  roster_nodes="${roster_nodes%%:*}"
+  observed="${roster##*observed_nodes=}"
+  observed="${observed%%:*}"
+  roster_set="$(node_set "$roster_nodes")"
+  observed_set="$(node_set "$observed")"
+  stats="$(docker exec as-ee-1 asinfo -v 'namespace/sc' 2>/dev/null || true)"
+  if [[ -n "$observed_set" && "$roster_set" == "$observed_set" ]] && grep -q 'ns_cluster_size=2' <<<"$stats"; then
     echo "  $roster"
     ready=1
     break
   fi
-  observed="${roster##*observed_nodes=}"
-  if [[ -n "$observed" && "$observed" != "$roster" && "$observed" != null ]]; then
+  if [[ -n "$observed_set" ]]; then
+    echo "  roster (${roster_set:-null}) does not match observed nodes ($observed_set); restaging"
     docker exec as-ee-1 asinfo -v "roster-set:namespace=sc;nodes=$observed" >/dev/null 2>&1 || true
     docker exec as-ee-1 asinfo -v 'recluster:' >/dev/null 2>&1 || true
   fi
   sleep 2
 done
 if [[ "$ready" -ne 1 ]]; then
-  echo "namespace sc never received a roster" >&2
+  echo "namespace sc roster does not match the live nodes" >&2
   exit 1
 fi
 

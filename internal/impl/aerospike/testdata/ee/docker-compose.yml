@@ -1,5 +1,6 @@
 # Local Enterprise cluster for integration_ee_test.go (all tickets, not only 1687).
-# Requires an EE feature key. Server and tools images are both pinned to 8.1.
+# Requires an EE feature key. The server image is pinned to 8.1. The tools
+# image uses its own version line and is pinned to 13.1.0.
 #
 #   as-ee-1 + as-ee-2  unsecured RF=2, ns test + sc
 #   as-ee-sec          security + TLS (user rpcn / rpcnpass)
@@ -47,7 +48,7 @@ services:
     command: ["--config-file", "/opt/rpcn/aerospike.conf"]
 
   as-ee-tools:
-    image: aerospike/aerospike-tools:8.1
+    image: aerospike/aerospike-tools:13.1.0
     container_name: as-ee-tools
     hostname: as-ee-tools
     entrypoint: ["sleep", "infinity"]

@@ -502,8 +502,7 @@ func resolveTLSCA(t *testing.T, ca string) string {
 	t.Helper()
 	candidates := []string{ca}
 	if !filepath.IsAbs(ca) {
-		trimmed := strings.TrimPrefix(strings.TrimPrefix(ca, "./"), "internal/impl/aerospike/")
-		if trimmed != "" && trimmed != ca && trimmed != strings.TrimPrefix(ca, "./") {
+		if trimmed, ok := strings.CutPrefix(strings.TrimPrefix(ca, "./"), "internal/impl/aerospike/"); ok && trimmed != "" {
 			candidates = append(candidates, trimmed)
 		}
 	}
