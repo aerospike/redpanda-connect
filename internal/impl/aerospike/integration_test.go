@@ -554,8 +554,9 @@ func TestIntegrationWriteKeepsExistingBins(t *testing.T) {
 }
 
 // TestIntegrationWriteAndUpdateNestedJSON stores lists, maps, and nested
-// collections as bins, then updates the record. update merges whole bins:
-// bins absent from the second message stay, including their nested values.
+// collections as bins, then writes the same key again. A later write merges
+// whole bins: bins absent from the second message stay, including their nested
+// values. operation update is an alias of write, so both messages use write.
 func TestIntegrationWriteAndUpdateNestedJSON(t *testing.T) {
 	const created = `{
 		"id": "user-1001",
@@ -610,18 +611,9 @@ func TestIntegrationWriteAndUpdateNestedJSON(t *testing.T) {
 		},
 	})
 
-	upd := newTestWriter(t, `
-hosts: [ "`+integrationHost(t)+`" ]
-namespace: `+integrationNamespace+`
-set: `+integrationOutputSet+`
-key: '${! json("id") }'
-bins: 'root = this.without("id")'
-operation: update
-`)
-	require.NoError(t, upd.Connect(t.Context()))
-	t.Cleanup(func() { _ = upd.Close(context.Background()) })
-
-	require.NoError(t, upd.WriteBatch(t.Context(), service.MessageBatch{
+	// update is an alias of write (parseOpKind). This second message is another
+	// write, not a different operation.
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
 		msg(t, `{"id":"user-1001","name":"SomeName M","simple_list":["red","green","blue","yellow"]}`),
 	}))
 
@@ -716,7 +708,10 @@ func nestedString(t *testing.T, v any, path ...any) string {
 }
 
 // normalizeAerospike makes server CDTs comparable to the JSON we wrote.
-// The client returns map keys as interface{} and integers in a few widths.
+// The client returns map keys as interface{} and integers as int or int64.
+// A whole-number float stays a float: turning it into int would hide a bin
+// stored as a double. A non-string map key keeps its type in the key text so
+// it cannot compare equal to a string key.
 func normalizeAerospike(v any) any {
 	switch t := v.(type) {
 	case map[string]any:
@@ -728,7 +723,7 @@ func normalizeAerospike(v any) any {
 	case map[any]any:
 		out := make(map[string]any, len(t))
 		for k, val := range t {
-			out[fmt.Sprint(k)] = normalizeAerospike(val)
+			out[aerospikeMapKey(k)] = normalizeAerospike(val)
 		}
 		return out
 	case []any:
@@ -744,42 +739,43 @@ func normalizeAerospike(v any) any {
 			return int(t)
 		}
 		return t
-	case float64:
-		if t == math.Trunc(t) && t >= math.MinInt && t <= math.MaxInt {
-			return int(t)
-		}
-		return t
 	default:
 		return v
 	}
+}
+
+func aerospikeMapKey(k any) string {
+	s, ok := k.(string)
+	if ok {
+		return s
+	}
+	return fmt.Sprintf("%T(%v)", k, k)
+}
+
+func TestNormalizeAerospikePreservesNumberAndKeyTypes(t *testing.T) {
+	assert.Equal(t, float64(560001), normalizeAerospike(float64(560001)))
+	assert.Equal(t, 10, normalizeAerospike(int64(10)))
+
+	got := normalizeAerospike(map[any]any{1: "zip"}).(map[string]any)
+	assert.NotContains(t, got, "1")
+	assert.Equal(t, "zip", got["int(1)"])
 }
 
 // TestIntegrationDeleteKeyOnly deletes from a JSON body that carries only the
 // key. A second delete of that missing key must succeed so a redelivery is not
 // nacked forever.
 func TestIntegrationDeleteKeyOnly(t *testing.T) {
-	w, client := outputSetup(t, "")
+	w, client := outputSetup(t, "operation: '${! meta(\"op\") }'\n")
 	require.NoError(t, w.WriteBatch(t.Context(),
-		service.MessageBatch{msg(t, `{"id":"dk1","email":"a@b.com"}`)}))
+		service.MessageBatch{opMsg(t, "write", `{"id":"dk1","email":"a@b.com"}`)}))
 	require.NotNil(t, outputRead(t, client, "dk1"))
 
-	del := newTestWriter(t, `
-hosts: [ "`+integrationHost(t)+`" ]
-namespace: `+integrationNamespace+`
-set: `+integrationOutputSet+`
-key: '${! json("id") }'
-bins: 'root = this.without("id")'
-operation: delete
-`)
-	require.NoError(t, del.Connect(t.Context()))
-	t.Cleanup(func() { _ = del.Close(context.Background()) })
-
-	require.NoError(t, del.WriteBatch(t.Context(),
-		service.MessageBatch{msg(t, `{"id":"dk1"}`)}))
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "delete", `{"id":"dk1"}`)}))
 	assert.Nil(t, outputRead(t, client, "dk1"))
 
-	require.NoError(t, del.WriteBatch(t.Context(),
-		service.MessageBatch{msg(t, `{"id":"dk1"}`)}))
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "delete", `{"id":"dk1"}`)}))
 }
 
 func TestIntegrationCreateOnlyFailsWhenExists(t *testing.T) {
@@ -819,6 +815,7 @@ func TestIntegrationPartialFailure(t *testing.T) {
 		msg(t, `{"id":"p3","ok":1}`),
 	}
 
+	indexer := batch.Index()
 	err := w.WriteBatch(t.Context(), batch)
 	require.Error(t, err)
 
@@ -826,8 +823,11 @@ func TestIntegrationPartialFailure(t *testing.T) {
 	require.ErrorAs(t, err, &batchErr)
 	assert.Equal(t, 1, batchErr.IndexedErrors(), "only the bad message should be failed")
 	assert.Contains(t, err.Error(), "1 of 3")
+	// The name is rejected while planning the batch, before any record is sent.
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "exceeds the Aerospike limit")
 
 	assert.NotNil(t, outputRead(t, client, "p1"))
+	assert.Nil(t, outputRead(t, client, "p2"))
 	assert.NotNil(t, outputRead(t, client, "p3"))
 }
 

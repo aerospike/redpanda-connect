@@ -17,6 +17,7 @@ package aerospike
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -404,6 +405,31 @@ func TestEEAuthRequiredWhenSecurityEnabled(t *testing.T) {
 	require.Error(t, w.Connect(t.Context()), "a secured cluster must refuse an unauthenticated client")
 }
 
+// resolveTLSCA returns an absolute path for the CA file named by ca.
+// go test runs with this package as cwd, so a repo-root relative path is also
+// tried with the internal/impl/aerospike prefix removed. That is the same
+// file. A missing path is an error; another certificate is not substituted.
+func resolveTLSCA(t *testing.T, ca string) string {
+	t.Helper()
+	candidates := []string{ca}
+	if !filepath.IsAbs(ca) {
+		if trimmed, ok := strings.CutPrefix(strings.TrimPrefix(ca, "./"), "internal/impl/aerospike/"); ok && trimmed != "" {
+			candidates = append(candidates, trimmed)
+		}
+	}
+	for _, p := range candidates {
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() {
+			continue
+		}
+		abs, err := filepath.Abs(p)
+		require.NoError(t, err)
+		return abs
+	}
+	t.Fatalf("AEROSPIKE_TLS_CA %q not found", ca)
+	return ""
+}
+
 // TLS needs the host spec to carry the server's tls-name, which is the
 // host:tlsname:port form the connector documents.
 func TestEETLS(t *testing.T) {
@@ -412,6 +438,7 @@ func TestEETLS(t *testing.T) {
 	if host == "" || ca == "" {
 		t.Skip("AEROSPIKE_TLS_HOST/AEROSPIKE_TLS_CA unset; TLS tests need a TLS-enabled Enterprise node")
 	}
+	ca = resolveTLSCA(t, ca)
 
 	yaml := `
 hosts: [ "` + host + `" ]

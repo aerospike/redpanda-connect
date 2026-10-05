@@ -119,10 +119,14 @@ schema_registry_decode:
 }
 
 // TestIntegrationUndecodedFormatsFail proves the output does not detect an
-// encoding. Raw MessagePack, Avro, and Kafka Avro bytes are not JSON, so the
-// default bins mapping fails and nothing is written.
+// encoding. The key comes from metadata, so it resolves. Raw MessagePack,
+// Avro, and Kafka Avro bytes are not JSON, so the bins mapping fails and
+// nothing is written under that key.
 func TestIntegrationUndecodedFormatsFail(t *testing.T) {
-	w, client := outputSetup(t, "")
+	w, client := outputSetup(t, `
+key: '${! meta("id") }'
+bins: 'root = this.without("id")'
+`)
 
 	cases := []struct {
 		name string
@@ -135,8 +139,14 @@ func TestIntegrationUndecodedFormatsFail(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := w.WriteBatch(t.Context(), service.MessageBatch{service.NewMessage(tc.raw)})
+			rawMsg := service.NewMessage(tc.raw)
+			rawMsg.MetaSet("id", tc.id)
+			batch := service.MessageBatch{rawMsg}
+			indexer := batch.Index()
+
+			err := w.WriteBatch(t.Context(), batch)
 			require.Error(t, err)
+			assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "bins")
 			assert.Nil(t, outputRead(t, client, tc.id))
 		})
 	}
@@ -183,7 +193,8 @@ func schemaRegistryServer(t *testing.T, schemaID int, schema string) string {
 }
 
 // decodeWithProcessor runs one Connect processor over raw bytes and returns
-// the structured message the Aerospike output would receive next.
+// that processor's message, metadata included. That is the message the next
+// stage of a pipeline would see.
 func decodeWithProcessor(t *testing.T, processorYAML string, raw []byte) *service.Message {
 	t.Helper()
 
@@ -198,12 +209,7 @@ func decodeWithProcessor(t *testing.T, processorYAML string, raw []byte) *servic
 	require.NoError(t, err)
 	require.Len(t, batch, 1)
 	require.NoError(t, batch[0].GetError())
-
-	v, err := batch[0].AsStructured()
-	require.NoError(t, err)
-	copied := service.NewMessage(nil)
-	copied.SetStructured(v)
-	return copied
+	return batch[0]
 }
 
 func indentYAML(s string) string {
