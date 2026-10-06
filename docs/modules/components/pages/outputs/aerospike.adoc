@@ -104,6 +104,7 @@ output:
     coalesce_batch_keys: true
     commit_level: all
     max_record_bytes: 0
+    ignore_error_codes: []
     concurrent_nodes: 0
     socket_timeout: 5s
     total_timeout: 10s
@@ -803,6 +804,32 @@ Reject a mapped record whose bins exceed this many bytes (approximate). `0` disa
 *Type*: `int`
 
 *Default*: `0`
+
+=== `ignore_error_codes`
+
+Aerospike result codes to acknowledge instead of failing the message. Empty by default, so a rejection is still a failure and Connect retries it.
+
+A listed code is logged at warning, counted in `aerospike_ignored_errors`, and then acknowledged. That drops the message: the record is not written, the payload is not kept, and `output.fallback` does not see it, because this output reported success. Use this for a permanent reject such as `13` (`RECORD_TOO_BIG`), `21` (`BIN_NAME_TOO_LONG`), or `22` (`FAIL_FORBIDDEN`), which would otherwise retry forever and hold the source partition.
+
+Code `21` also covers a top-level bin name longer than 15 bytes. That name is rejected while the batch is planned, so the record is never sent and the server does not return 21. A key inside a map or list is not a bin name and is not code 21.
+
+Code `22` is returned when a positive TTL is written to a namespace with `nsup-period 0`. TTL values `0`, `-1` (`never`), and `-2` (`keep`) do not return 22.
+
+A connection failure of the batch is still a failure. So is any mapping error other than that 15-byte name, and any result code left off this list. `max_record_bytes` is a separate local limit and is not code 13.
+
+
+*Type*: `array`
+
+*Default*: `[]`
+
+```yml
+# Examples
+
+ignore_error_codes:
+  - 13
+  - 21
+  - 22
+```
 
 === `concurrent_nodes`
 

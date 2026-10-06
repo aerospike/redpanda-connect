@@ -455,6 +455,9 @@ func (m *batchMapper) applyBins(op *pendingOp, index int) error {
 
 	for _, name := range names {
 		if err := validateBinName(name); err != nil {
+			if len(name) > maxBinNameLen {
+				return &longBinNameError{key: op.key, name: name, n: len(name)}
+			}
 			return fmt.Errorf("%w; rename it in the '%v' mapping", err, fieldBins)
 		}
 		value, err := toAerospike(obj[name], m.conf.coerceInts)

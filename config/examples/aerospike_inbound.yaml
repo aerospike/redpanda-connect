@@ -12,6 +12,14 @@
 # A null body on users deletes the record when tombstone_as_delete is true.
 # The Kafka message key must be the user id, because a tombstone has no JSON body.
 #
+# The users output lists every aerospike field. Commented lines are optional;
+# uncomment one to override its default. Possible values are noted on the line.
+# ignore_error_codes is unset, so a permanent reject keeps retrying.
+# config/examples/aerospike_inbound_dlq.yaml shows one namespace with fallback and
+# ignore_error_codes, and another namespace with neither.
+# Listing 13, 21, or 22 acknowledges the message inside this output, so a fallback
+# never receives it.
+#
 # Run (local Redpanda :19092, Aerospike namespace test, cluster-name redpanda-demo):
 #   task run CONF=./config/examples/aerospike_inbound.yaml
 #
@@ -39,18 +47,67 @@ output:
           aerospike:
             hosts: [ "127.0.0.1:3000" ]
             cluster_name: redpanda-demo
+            # use_services_alternate: false
+            # connect_timeout: 30s
+            # max_connections_per_node: 100
+            # min_connections_per_node: 0
+            # warm_up: true
+            # max_error_rate: 100
+            # error_rate_window: 1
+            # credentials:
+            #   username: ""
+            #   password: ""
+            # auth_mode: internal # internal, external, pki
+            # tls:
+            #   enabled: false
+            #   skip_cert_verify: false
+            #   enable_renegotiation: false
+            #   root_cas: ""
+            #   root_cas_file: ""
+            #   client_certs: []
             namespace: test
             set: users
             key: '${! json("user_id").catch(meta("kafka_key")) }'
+            # key_type: string # string, int, bytes
+            # key_encoding: utf8 # utf8, base64, hex. Used when key_type is bytes.
             bins: 'root = this.without("user_id", "ttl")'
-            operation: replace
-            ttl: '${! json("ttl").or("keep") }'
+            # coerce_integral_floats: true
+            operation: replace # write, replace, create_only, update_only, delete
             tombstone_as_delete: true
+            ttl: '${! json("ttl").or("keep") }' # duration, 0, never / -1, keep / -2
+            # generation: '${! meta("aerospike_generation") }'
+            # send_key: false
+            # durable_delete: false # Enterprise only. Writes a tombstone on delete.
+            # coalesce_batch_keys: true
+            # commit_level: all # all, master
+            # max_record_bytes: 0 # 0 disables the local size check
+            # ignore_error_codes: [13, 21, 22]
+            #   13 RECORD_TOO_BIG is returned by the server.
+            #   21 BIN_NAME_TOO_LONG also covers a top-level name longer than 15 bytes,
+            #   which is rejected here and never sent.
+            #   22 FAIL_FORBIDDEN is returned when a positive ttl is written to a
+            #   namespace with nsup-period 0. 0, -1, and -2 do not return 22.
+            #   A listed code is logged, counted on aerospike_ignored_errors, and
+            #   acknowledged. The record is not written.
+            # concurrent_nodes: 0 # 0 fans the batch out to every node
+            # socket_timeout: 5s
+            # total_timeout: 10s
+            # max_retries: 0
+            # fencing:
+            #   enabled: false
+            #   bin: _fence
+            #   value: '${! meta("kafka_offset") }' # or meta("kafka_timestamp_ms"), or json("version")
+            #   tombstone_bin: _deleted
+            #   tombstone_ttl: never # or a duration such as 168h
             batching:
               count: 10
               period: 200ms
+              # byte_size: 0
+              # check: ""
+            # max_in_flight: 64 # 1 keeps writes to one key in stream order
 
       # Merge bins into the payments set. The set name is the topic name. Key is id.
+      # Optional fields, including ignore_error_codes, are listed on the users output.
       - check: meta("kafka_topic") == "payments"
         output:
           aerospike:
@@ -67,6 +124,7 @@ output:
               period: 200ms
 
       # Delete the users record. This topic carries only the key.
+      # Optional fields, including ignore_error_codes, are listed on the users output.
       - check: meta("kafka_topic") == "user-deletes"
         output:
           aerospike:

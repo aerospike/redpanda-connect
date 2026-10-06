@@ -21,6 +21,20 @@ import (
 	"github.com/aerospike/aerospike-client-go/v8/types"
 )
 
+// longBinNameError is the local rejection of a top-level bin name longer than
+// 15 bytes. The record is never sent, so the server does not return
+// BIN_NAME_TOO_LONG. ignore_error_codes 21 acknowledges this error because
+// that is the result code the same name would produce.
+type longBinNameError struct {
+	key  *as.Key
+	name string
+	n    int
+}
+
+func (e *longBinNameError) Error() string {
+	return fmt.Sprintf("bin name %q is %d bytes, which exceeds the Aerospike limit of %d; rename it in the '%v' mapping", e.name, e.n, maxBinNameLen, fieldBins)
+}
+
 // classifyRecord converts a per-key batch result into an error, or nil when the
 // key was handled successfully.
 //

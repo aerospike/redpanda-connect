@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
+	"github.com/aerospike/aerospike-client-go/v8/types"
 
 	"github.com/redpanda-data/benthos/v4/public/bloblang"
 	"github.com/redpanda-data/benthos/v4/public/service"
@@ -33,6 +34,7 @@ const (
 	fieldDurableDelete        = "durable_delete"
 	fieldCoalesceBatchKeys    = "coalesce_batch_keys"
 	fieldMaxRecordBytes       = "max_record_bytes"
+	fieldIgnoreErrorCodes     = "ignore_error_codes"
 	fieldFencing              = "fencing"
 	fieldFencingEnabled       = "enabled"
 	fieldFencingBin           = "bin"
@@ -187,6 +189,20 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 			Default(0).
 			LintRule(nonNegativeLint).
 			Advanced(),
+
+		service.NewIntListField(fieldIgnoreErrorCodes).
+			Description(`Aerospike result codes to acknowledge instead of failing the message. Empty by default, so a rejection is still a failure and Connect retries it.
+
+A listed code is logged at warning, counted in `+"`aerospike_ignored_errors`"+`, and then acknowledged. That drops the message: the record is not written, the payload is not kept, and `+"`output.fallback`"+` does not see it, because this output reported success. Use this for a permanent reject such as `+"`13`"+` (`+"`RECORD_TOO_BIG`"+`), `+"`21`"+` (`+"`BIN_NAME_TOO_LONG`"+`), or `+"`22`"+` (`+"`FAIL_FORBIDDEN`"+`), which would otherwise retry forever and hold the source partition.
+
+Code `+"`21`"+` also covers a top-level bin name longer than 15 bytes. That name is rejected while the batch is planned, so the record is never sent and the server does not return 21. A key inside a map or list is not a bin name and is not code 21.
+
+Code `+"`22`"+` is returned when a positive TTL is written to a namespace with `+"`nsup-period 0`"+`. TTL values `+"`0`"+`, `+"`-1`"+` (`+"`never`"+`), and `+"`-2`"+` (`+"`keep`"+`) do not return 22.
+
+A connection failure of the batch is still a failure. So is any mapping error other than that 15-byte name, and any result code left off this list. `+"`max_record_bytes`"+` is a separate local limit and is not code 13.`).
+			Default([]int{}).
+			Example([]int{13, 21, 22}).
+			Advanced(),
 	)
 	spec = spec.Fields(batchPolicyFieldsWithRetries(0)...)
 	return spec.Fields(
@@ -294,6 +310,10 @@ type aerospikeConfig struct {
 
 	maxRecordBytes int
 
+	// ignoreCodes are per-record result codes acknowledged as success. Empty
+	// means every rejection fails the message.
+	ignoreCodes map[int]struct{}
+
 	fenceEnabled bool
 	fenceBin     string
 	fenceValue   *service.InterpolatedString
@@ -360,6 +380,17 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 	}
 	if c.maxRecordBytes < 0 {
 		return nil, fmt.Errorf("field '%v' must not be negative", fieldMaxRecordBytes)
+	}
+
+	codes, err := conf.FieldIntList(fieldIgnoreErrorCodes)
+	if err != nil {
+		return nil, err
+	}
+	if len(codes) > 0 {
+		c.ignoreCodes = make(map[int]struct{}, len(codes))
+		for _, code := range codes {
+			c.ignoreCodes[code] = struct{}{}
+		}
 	}
 
 	if conf.Contains(fieldFencing) {
@@ -429,4 +460,14 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 	c.deletePolicy.CommitLevel = commit
 
 	return c, nil
+}
+
+// ignores reports whether a per-record result code is configured to be
+// acknowledged. An empty list ignores nothing.
+func (c *aerospikeConfig) ignores(code types.ResultCode) bool {
+	if c == nil || len(c.ignoreCodes) == 0 {
+		return false
+	}
+	_, ok := c.ignoreCodes[int(code)]
+	return ok
 }

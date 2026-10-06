@@ -874,6 +874,23 @@ func TestIntegrationPartialFailure(t *testing.T) {
 	assert.NotNil(t, outputRead(t, client, "p3"))
 }
 
+// Listing 21 acknowledges the local 15-byte rejection. The long-name record is
+// still not stored, and the other records in the batch are.
+func TestIntegrationIgnoreLongBinName(t *testing.T) {
+	w, client := outputSetup(t, "ignore_error_codes: [21]\n")
+
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"p1","ok":1}`),
+		msg(t, `{"id":"p2","this_bin_name_is_much_too_long":1}`),
+		msg(t, `{"id":"p3","ok":1}`),
+	})
+	require.NoError(t, err)
+
+	assert.NotNil(t, outputRead(t, client, "p1"))
+	assert.Nil(t, outputRead(t, client, "p2"))
+	assert.NotNil(t, outputRead(t, client, "p3"))
+}
+
 // firstIndexedError returns the per-message error a batch failure carried, so a
 // test can assert on why a message was nacked rather than only that it was.
 func firstIndexedError(t *testing.T, indexer *service.Indexer, err error) error {
