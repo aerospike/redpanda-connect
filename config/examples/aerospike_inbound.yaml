@@ -1,0 +1,82 @@
+# Consume Redpanda topics and write each one to Aerospike.
+# The operation is chosen per topic. The message JSON does not carry an operation.
+#
+# Topics:
+#   users          {"user_id":"u-42","email":"a@b.com","ttl":"24H"}
+#                  replace the record; ttl accepts 24H, 1D, 5M, 60S, 3600, -1, -2, 0
+#   payments       {"id":"p-1","amount":9.50}
+#                  merge bins; the set name is the topic name
+#   user-deletes   {"user_id":"u-42"}
+#                  delete the users record with that key
+#
+# A null body on users deletes the record when tombstone_as_delete is true.
+# The Kafka message key must be the user id, because a tombstone has no JSON body.
+#
+# Run (local Redpanda :19092, Aerospike namespace test, cluster-name redpanda-demo):
+#   task run CONF=./config/examples/aerospike_inbound.yaml
+#
+# Kafka broker TLS/SASL belongs on input.redpanda, not this output.
+
+http:
+  enabled: false
+
+input:
+  redpanda:
+    seed_brokers: [ "127.0.0.1:19092" ]
+    topics: [ users, payments, user-deletes ]
+    consumer_group: aerospike-sink
+    # earliest = replay available records; latest = new records only;
+    # committed = require a prior committed offset (Kafka auto.offset.reset=none).
+    start_offset: earliest
+
+output:
+  switch:
+    retry_until_success: false
+    cases:
+      # Replace the users record. Key is user_id, or the Kafka message key when the body is empty.
+      - check: meta("kafka_topic") == "users"
+        output:
+          aerospike:
+            hosts: [ "127.0.0.1:3000" ]
+            cluster_name: redpanda-demo
+            namespace: test
+            set: users
+            key: '${! json("user_id").catch(meta("kafka_key")) }'
+            bins: 'root = this.without("user_id", "ttl")'
+            operation: replace
+            ttl: '${! json("ttl").or("keep") }'
+            tombstone_as_delete: true
+            batching:
+              count: 10
+              period: 200ms
+
+      # Merge bins into the payments set. The set name is the topic name. Key is id.
+      - check: meta("kafka_topic") == "payments"
+        output:
+          aerospike:
+            hosts: [ "127.0.0.1:3000" ]
+            cluster_name: redpanda-demo
+            namespace: test
+            set: '${! meta("kafka_topic") }'
+            key: '${! json("id") }'
+            bins: 'root = this.without("id")'
+            operation: write
+            ttl: keep
+            batching:
+              count: 10
+              period: 200ms
+
+      # Delete the users record. This topic carries only the key.
+      - check: meta("kafka_topic") == "user-deletes"
+        output:
+          aerospike:
+            hosts: [ "127.0.0.1:3000" ]
+            cluster_name: redpanda-demo
+            namespace: test
+            set: users
+            key: '${! json("user_id") }'
+            operation: delete
+
+logger:
+  level: INFO
+  format: logfmt

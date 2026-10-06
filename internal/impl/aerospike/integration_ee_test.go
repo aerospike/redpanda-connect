@@ -37,6 +37,9 @@ import (
 // TLS. They need an Enterprise cluster with replication-factor 2, an AP
 // namespace `test` and a strong-consistency namespace `sc`, addressed by
 // AEROSPIKE_EE_HOSTS.
+//
+// Local 3-container setup (license key required): testdata/ee/README.md
+// (as-ee-1/2 for AEROSPIKE_EE_HOSTS, as-ee-sec for AEROSPIKE_SEC_HOST / TLS).
 const (
 	eeAPNamespace = "test"
 	eeSCNamespace = "sc"
@@ -162,6 +165,92 @@ func TestEEClusterIsMultiNode(t *testing.T) {
 	// Replication factor has to be above one or commit_level and replica are
 	// both no-ops no matter what the tests assert.
 	assert.GreaterOrEqual(t, nsStat(t, client, eeAPNamespace, "effective_replication_factor"), int64(2)*int64(len(nodes)))
+}
+
+// TTL 20s + nsup-period 10: write, see the record, wait until NSUP drops it.
+// Long enough to SELECT PK ttl-gone from as-ee-tools while the test runs.
+func TestEETTLExpiresRemovesRecord(t *testing.T) {
+	w, client := eeWriter(t, eeAPNamespace, "ttl: 20s\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"ttl-gone","v":"temp"}`),
+	}))
+	rec := eeRead(t, client, eeAPNamespace, "ttl-gone")
+	require.NotNil(t, rec, "record must exist before NSUP runs")
+	assert.InDelta(t, 20, rec.Expiration, 5)
+
+	// 20s TTL plus nsup-period 10, with slack so NSUP can delete it.
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		if eeRead(t, client, eeAPNamespace, "ttl-gone") == nil {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatal("record still present after TTL + nsup-period; check namespace test has nsup-period 10")
+}
+
+// TTL interpolated from a JSON field "24H": the record must land with an
+// expiration close to 86400 seconds. We do not wait for it to expire.
+func TestEETTLInterpolated24HKeepsRecord(t *testing.T) {
+	w, client := eeWriter(t, eeAPNamespace, "ttl: '${! json(\"ttl\") }'\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"ttl-24h","v":"persistent","ttl":"24H"}`),
+	}))
+
+	rec := eeRead(t, client, eeAPNamespace, "ttl-24h")
+	require.NotNil(t, rec, "record must exist immediately after write")
+	assert.InDelta(t, 86400, rec.Expiration, 60, "expiration must be approximately 24 h (86400 s)")
+}
+
+// An invalid TTL token ("24X") must be rejected per-message without sending
+// anything to Aerospike. The batch error must be indexed and the record must
+// not appear on the cluster.
+func TestEETTLInvalidValueIsRejected(t *testing.T) {
+	w, client := eeWriter(t, eeAPNamespace, "ttl: '${! json(\"ttl\") }'\n")
+
+	batch := service.MessageBatch{msg(t, `{"id":"ttl-bad","v":"temp","ttl":"24X"}`)}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err, "an invalid TTL value must produce an error")
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "ttl",
+		"the indexed error must name the offending field")
+	assert.Nil(t, eeRead(t, client, eeAPNamespace, "ttl-bad"),
+		"the rejected message must not have been stored")
+}
+
+// A record written with ttl=never must survive at least one full NSUP cycle.
+// The record stays until the next test truncates this set. Storage is memory,
+// so that leftover is not durable.
+// A short-lived control record (12 s TTL) acts as a canary: once NSUP removes
+// it we know the subsystem has run and the immortal record was deliberately
+// spared. With nsup-period 10 the control is gone within 12+10=22 s worst
+// case; we poll for up to 60 s to give the server margin.
+func TestEETTLNeverSurvivesNSUP(t *testing.T) {
+	w, client := eeWriter(t, eeAPNamespace, "ttl: '${! json(\"ttl\") }'\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"ttl-never","v":"immortal","ttl":"never"}`),
+	}))
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"ttl-ctrl","v":"ephemeral","ttl":"12s"}`),
+	}))
+
+	require.NotNil(t, eeRead(t, client, eeAPNamespace, "ttl-never"),
+		"never record must exist before any NSUP cycle")
+	require.NotNil(t, eeRead(t, client, eeAPNamespace, "ttl-ctrl"),
+		"control record must exist before NSUP removes it")
+
+	// Block until NSUP demonstrably removes the control record. Once it is
+	// gone we know at least one NSUP pass has completed since the writes.
+	assert.Eventually(t, func() bool {
+		return eeRead(t, client, eeAPNamespace, "ttl-ctrl") == nil
+	}, 60*time.Second, time.Second,
+		"control record (ttl=12s) must be removed by NSUP within ttl+nsup-period; check nsup-period 10 is set on namespace %s", eeAPNamespace)
+
+	assert.NotNil(t, eeRead(t, client, eeAPNamespace, "ttl-never"),
+		"record with ttl=never must still be present after NSUP ran")
 }
 
 // A durable delete leaves a tombstone behind so the record cannot be
