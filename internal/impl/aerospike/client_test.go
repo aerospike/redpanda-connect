@@ -536,3 +536,45 @@ key_encoding: base64
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "base64")
 }
+
+func TestKeyBytesRejectsBadHex(t *testing.T) {
+	msg := service.NewMessage(nil)
+	msg.MetaSet("k", "zz")
+
+	_, err := resolveKey(t, `
+namespace: test
+key: '${! meta("k") }'
+key_type: bytes
+key_encoding: hex
+`, msg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hex")
+}
+
+func TestKeyInterpolatesNamespaceAndSet(t *testing.T) {
+	msg := service.NewMessage([]byte(`{"id":"u1"}`))
+	msg.MetaSet("ns", "payments")
+	msg.MetaSet("set", "orders")
+
+	key, err := resolveKey(t, `
+namespace: '${! meta("ns") }'
+set: '${! meta("set") }'
+key: '${! json("id") }'
+`, msg)
+	require.NoError(t, err)
+	assert.Equal(t, "payments", key.Namespace())
+	assert.Equal(t, "orders", key.SetName())
+	assert.Equal(t, "u1", key.Value().GetObject())
+}
+
+func TestKeyRejectsOverlongNamespace(t *testing.T) {
+	msg := service.NewMessage([]byte(`{"id":"u1"}`))
+	msg.MetaSet("ns", strings.Repeat("n", maxNamespaceNameLen+1))
+
+	_, err := resolveKey(t, `
+namespace: '${! meta("ns") }'
+key: '${! json("id") }'
+`, msg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "31")
+}
