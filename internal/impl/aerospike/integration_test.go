@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -101,7 +102,7 @@ func startAerospike() (string, error) {
 	defer cancel()
 
 	hostPortStr := strconv.Itoa(hostPort)
-	_, err = testcontainers.Run(ctx, aerospikeImage,
+	ctr, err := testcontainers.Run(ctx, aerospikeImage,
 		testcontainers.WithExposedPorts(aerospikeContainerPort),
 		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) {
 			hc.PortBindings = mobynet.PortMap{
@@ -120,6 +121,14 @@ func startAerospike() (string, error) {
 	)
 	if err != nil {
 		return "", err
+	}
+
+	mapped, err := ctr.MappedPort(ctx, aerospikeContainerPort)
+	if err != nil {
+		return "", err
+	}
+	if mapped.Port() != hostPortStr {
+		return "", fmt.Errorf("aerospike host port: mapped %s, want %s", mapped.Port(), hostPortStr)
 	}
 
 	addr := net.JoinHostPort("127.0.0.1", hostPortStr)
@@ -296,6 +305,9 @@ func TestIntegrationWriteAndRead(t *testing.T) {
 	assert.Equal(t, 10, rec.Bins["score"])
 	assert.Equal(t, 0.5, rec.Bins["ratio"])
 	assert.Equal(t, []any{"x", "y"}, rec.Bins["tags"])
+	// The key field addresses the record and must not be stored again as a bin.
+	assert.NotContains(t, rec.Bins, "id")
+	assert.Len(t, rec.Bins, 4)
 }
 
 // TestIntegrationJSONUserRecord is the kafka-inbound key-field + bins case:
@@ -340,6 +352,99 @@ func TestIntegrationCoalescing(t *testing.T) {
 	assert.Equal(t, "last", rec.Bins["shared"])
 
 	assert.NotNil(t, outputRead(t, client, "c2"))
+}
+
+// TestIntegrationCoalesceDisjointBins proves two messages for one key in the
+// same batch, with no bin names in common, become one record that has both
+// sets of bins.
+func TestIntegrationCoalesceDisjointBins(t *testing.T) {
+	w, client := outputSetup(t, "")
+
+	batch := service.MessageBatch{
+		msg(t, `{"id":"c3","a":1,"b":2}`),
+		msg(t, `{"id":"c3","c":3,"d":4}`),
+	}
+	require.NoError(t, w.WriteBatch(t.Context(), batch))
+
+	rec := outputRead(t, client, "c3")
+	require.NotNil(t, rec)
+	assert.Equal(t, 1, rec.Bins["a"])
+	assert.Equal(t, 2, rec.Bins["b"])
+	assert.Equal(t, 3, rec.Bins["c"])
+	assert.Equal(t, 4, rec.Bins["d"])
+	assert.NotContains(t, rec.Bins, "id")
+}
+
+// TestIntegrationBinNamesAreCaseSensitive proves a bin name keeps its case.
+// "tier" and "Tier" are two bins, and the same spelling difference inside a
+// map bin is two map keys.
+func TestIntegrationBinNamesAreCaseSensitive(t *testing.T) {
+	w, client := outputSetup(t, "")
+
+	batch := service.MessageBatch{
+		msg(t, `{"id":"case1","tier":"gold","Tier":"silver","prefs":{"theme":"dark","Theme":"light"}}`),
+	}
+	require.NoError(t, w.WriteBatch(t.Context(), batch))
+
+	rec := outputRead(t, client, "case1")
+	require.NotNil(t, rec)
+	assertNestedBins(t, rec.Bins, map[string]any{
+		"tier":  "gold",
+		"Tier":  "silver",
+		"prefs": map[string]any{"theme": "dark", "Theme": "light"},
+	})
+}
+
+// TestIntegrationSameKeyAcrossBatches locks the boundary between batches.
+// Messages in different WriteBatch calls are not folded. A later write keeps
+// bins from the earlier batch. A later delete removes the record. The same
+// write-then-delete pair inside one batch must not leave the record, because
+// that pair is folded into a single delete.
+func TestIntegrationSameKeyAcrossBatches(t *testing.T) {
+	w, client := outputSetup(t, "operation: '${! meta(\"op\") }'\n")
+
+	t.Run("later write keeps bins from the earlier batch", func(t *testing.T) {
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"x1","a":1,"b":2}`),
+		}))
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"x1","c":3,"d":4}`),
+		}))
+
+		rec := outputRead(t, client, "x1")
+		require.NotNil(t, rec)
+		assert.Equal(t, 1, rec.Bins["a"])
+		assert.Equal(t, 2, rec.Bins["b"])
+		assert.Equal(t, 3, rec.Bins["c"])
+		assert.Equal(t, 4, rec.Bins["d"])
+	})
+
+	t.Run("later delete removes the record", func(t *testing.T) {
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"x2","a":1,"b":2}`),
+		}))
+		require.NotNil(t, outputRead(t, client, "x2"))
+
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "delete", `{"id":"x2"}`),
+		}))
+		assert.Nil(t, outputRead(t, client, "x2"))
+	})
+
+	t.Run("write then delete in one batch leaves nothing", func(t *testing.T) {
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"x3","a":1,"b":2}`),
+			opMsg(t, "delete", `{"id":"x3"}`),
+		}))
+		assert.Nil(t, outputRead(t, client, "x3"))
+	})
+}
+
+func opMsg(t *testing.T, op, body string) *service.Message {
+	t.Helper()
+	m := msg(t, body)
+	m.MetaSet("op", op)
+	return m
 }
 
 func TestIntegrationTombstoneDeletes(t *testing.T) {
@@ -449,6 +554,38 @@ func TestIntegrationTTL(t *testing.T) {
 	assert.InDelta(t, 3600, rec.Expiration, 60)
 }
 
+func TestIntegrationTTLFromJSON(t *testing.T) {
+	w, client := outputSetup(t, "ttl: '${! json(\"ttl\") }'\n")
+
+	for _, tc := range []struct {
+		id   string
+		body string
+		want float64
+	}{
+		{id: "t24h", body: `{"id":"t24h","v":1,"ttl":"24H"}`, want: 86400},
+		{id: "t1d", body: `{"id":"t1d","v":1,"ttl":"1D"}`, want: 86400},
+		{id: "t3600", body: `{"id":"t3600","v":1,"ttl":3600}`, want: 3600},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			require.NoError(t, w.WriteBatch(t.Context(),
+				service.MessageBatch{msg(t, tc.body)}))
+			rec := outputRead(t, client, tc.id)
+			require.NotNil(t, rec)
+			assert.InDelta(t, tc.want, rec.Expiration, 60)
+		})
+	}
+}
+
+func TestIntegrationTTLRejectsInvalidJSON(t *testing.T) {
+	w, _ := outputSetup(t, "ttl: '${! json(\"ttl\") }'\n")
+
+	batch := service.MessageBatch{msg(t, `{"id":"tbad","v":1,"ttl":"24X"}`)}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "ttl")
+}
+
 func TestIntegrationReplaceClearsOldBins(t *testing.T) {
 	w, client := outputSetup(t, "operation: replace\n")
 
@@ -464,6 +601,275 @@ func TestIntegrationReplaceClearsOldBins(t *testing.T) {
 	assert.NotContains(t, rec.Bins, "b", "replace must drop bins not named in the write")
 }
 
+// TestIntegrationWriteKeepsExistingBins proves write merges across batches:
+// a later message adds a bin and leaves bins from the earlier write in place.
+func TestIntegrationWriteKeepsExistingBins(t *testing.T) {
+	w, client := outputSetup(t, "operation: write\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"m1","a":1}`)}))
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"m1","b":2}`)}))
+
+	rec := outputRead(t, client, "m1")
+	require.NotNil(t, rec)
+	assert.Equal(t, 1, rec.Bins["a"])
+	assert.Equal(t, 2, rec.Bins["b"])
+}
+
+// TestIntegrationWriteAndUpdateNestedJSON stores lists, maps, and nested
+// collections as bins, then writes the same key again. A later write merges
+// whole bins: bins absent from the second message stay, including their nested
+// values. operation update is an alias of write, so both messages use write.
+func TestIntegrationWriteAndUpdateNestedJSON(t *testing.T) {
+	const created = `{
+		"id": "user-1001",
+		"name": "SomeName",
+		"addresses": [
+			{"type": "home", "city": "Bangalore", "state": "Karnataka", "zip": 560001, "location": {"lat": 12.9716, "lon": 77.5946}},
+			{"type": "office", "city": "Chennai", "state": "Tamil Nadu", "zip": 600001, "location": {"lat": 13.0827, "lon": 80.2707}}
+		],
+		"single_map": {"name": "primary", "value": "test-value"},
+		"simple_list": ["red", "green", "blue"],
+		"list_of_lists": [[1, 2, 3], [10, 20, 30], [100, 200, 300]],
+		"map_of_maps": {
+			"personal": {"email": "test@example.com", "phone": "9999999999"},
+			"work": {"company": "Aerospike", "role": "Engineer"}
+		},
+		"complex_map": {
+			"profile": {"first_name": "SomeName", "last_name": "M"},
+			"skills": ["Aerospike", "Kafka", "Java"],
+			"projects": [
+				{"name": "project-a", "status": "active", "technologies": ["Kafka", "Aerospike"]},
+				{"name": "project-b", "status": "completed", "technologies": ["Python", "Docker"]}
+			]
+		}
+	}`
+
+	w, client := outputSetup(t, "operation: write\n")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, created)}))
+
+	rec := outputRead(t, client, "user-1001")
+	require.NotNil(t, rec)
+	assert.NotContains(t, rec.Bins, "id")
+	assertNestedBins(t, rec.Bins, map[string]any{
+		"name": "SomeName",
+		"addresses": []any{
+			map[string]any{"type": "home", "city": "Bangalore", "state": "Karnataka", "zip": 560001, "location": map[string]any{"lat": 12.9716, "lon": 77.5946}},
+			map[string]any{"type": "office", "city": "Chennai", "state": "Tamil Nadu", "zip": 600001, "location": map[string]any{"lat": 13.0827, "lon": 80.2707}},
+		},
+		"single_map":    map[string]any{"name": "primary", "value": "test-value"},
+		"simple_list":   []any{"red", "green", "blue"},
+		"list_of_lists": []any{[]any{1, 2, 3}, []any{10, 20, 30}, []any{100, 200, 300}},
+		"map_of_maps": map[string]any{
+			"personal": map[string]any{"email": "test@example.com", "phone": "9999999999"},
+			"work":     map[string]any{"company": "Aerospike", "role": "Engineer"},
+		},
+		"complex_map": map[string]any{
+			"profile": map[string]any{"first_name": "SomeName", "last_name": "M"},
+			"skills":  []any{"Aerospike", "Kafka", "Java"},
+			"projects": []any{
+				map[string]any{"name": "project-a", "status": "active", "technologies": []any{"Kafka", "Aerospike"}},
+				map[string]any{"name": "project-b", "status": "completed", "technologies": []any{"Python", "Docker"}},
+			},
+		},
+	})
+
+	// update is an alias of write (parseOpKind). This second message is another
+	// write, not a different operation.
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"user-1001","name":"SomeName M","simple_list":["red","green","blue","yellow"]}`),
+	}))
+
+	rec = outputRead(t, client, "user-1001")
+	require.NotNil(t, rec)
+	assert.Equal(t, "SomeName M", rec.Bins["name"])
+	assert.Equal(t, []any{"red", "green", "blue", "yellow"}, rec.Bins["simple_list"])
+	assert.Equal(t, "Bangalore", nestedString(t, rec.Bins["addresses"], 0, "city"))
+	assert.Equal(t, "Aerospike", nestedString(t, rec.Bins["map_of_maps"], "work", "company"))
+}
+
+// TestIntegrationNestedBinVariations checks three JSON shapes on their own.
+// The field name is the bin name. A later write to the same key replaces only
+// the bins present in that message.
+func TestIntegrationNestedBinVariations(t *testing.T) {
+	w, client := outputSetup(t, "operation: write\n")
+
+	tests := []struct {
+		name   string
+		id     string
+		write  string
+		update string
+		want   map[string]any
+	}{
+		{
+			name:   "string list",
+			id:     "colors",
+			write:  `{"id":"colors","label":"paint","simple_list":["red","green","blue"]}`,
+			update: `{"id":"colors","simple_list":["red","green","blue","yellow"]}`,
+			want: map[string]any{
+				"label":       "paint",
+				"simple_list": []any{"red", "green", "blue", "yellow"},
+			},
+		},
+		{
+			name:   "list of maps",
+			id:     "places",
+			write:  `{"id":"places","city":"Bangalore","addresses":[{"type":"home","zip":560001},{"type":"office","zip":600001}]}`,
+			update: `{"id":"places","addresses":[{"type":"office","zip":600001}]}`,
+			want: map[string]any{
+				"city":      "Bangalore",
+				"addresses": []any{map[string]any{"type": "office", "zip": 600001}},
+			},
+		},
+		{
+			name:   "map of lists",
+			id:     "groups",
+			write:  `{"id":"groups","label":"sets","groups":{"colors":["red","green"],"nums":[1,2,3]}}`,
+			update: `{"id":"groups","label":"updated"}`,
+			want: map[string]any{
+				"label": "updated",
+				"groups": map[string]any{
+					"colors": []any{"red", "green"},
+					"nums":   []any{1, 2, 3},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, tc.write)}))
+			require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, tc.update)}))
+
+			rec := outputRead(t, client, tc.id)
+			require.NotNil(t, rec)
+			assert.NotContains(t, rec.Bins, "id")
+			assertNestedBins(t, rec.Bins, tc.want)
+		})
+	}
+}
+
+func assertNestedBins(t *testing.T, got map[string]any, want map[string]any) {
+	t.Helper()
+	assert.Equal(t, normalizeAerospike(want), normalizeAerospike(got))
+}
+
+func nestedString(t *testing.T, v any, path ...any) string {
+	t.Helper()
+	cur := normalizeAerospike(v)
+	for _, p := range path {
+		switch key := p.(type) {
+		case int:
+			cur = cur.([]any)[key]
+		case string:
+			cur = cur.(map[string]any)[key]
+		}
+	}
+	s, ok := cur.(string)
+	require.True(t, ok, "expected string at %v, got %T", path, cur)
+	return s
+}
+
+// normalizeAerospike makes server CDTs comparable to the JSON we wrote.
+// The client returns map keys as interface{} and integers as int or int64.
+// A whole-number float stays a float: turning it into int would hide a bin
+// stored as a double. A non-string map key keeps its type in the key text so
+// it cannot compare equal to a string key.
+func normalizeAerospike(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[k] = normalizeAerospike(val)
+		}
+		return out
+	case map[any]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[aerospikeMapKey(k)] = normalizeAerospike(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = normalizeAerospike(val)
+		}
+		return out
+	case int:
+		return t
+	case int64:
+		if t >= math.MinInt && t <= math.MaxInt {
+			return int(t)
+		}
+		return t
+	default:
+		return v
+	}
+}
+
+func aerospikeMapKey(k any) string {
+	s, ok := k.(string)
+	if ok {
+		return s
+	}
+	return fmt.Sprintf("%T(%v)", k, k)
+}
+
+func TestNormalizeAerospikePreservesNumberAndKeyTypes(t *testing.T) {
+	assert.Equal(t, float64(560001), normalizeAerospike(float64(560001)))
+	assert.Equal(t, 10, normalizeAerospike(int64(10)))
+
+	got := normalizeAerospike(map[any]any{1: "zip"}).(map[string]any)
+	assert.NotContains(t, got, "1")
+	assert.Equal(t, "zip", got["int(1)"])
+}
+
+// TestIntegrationDeleteKeyOnly deletes from a JSON body that carries only the
+// key. A second delete of that missing key must succeed so a redelivery is not
+// nacked forever.
+func TestIntegrationDeleteKeyOnly(t *testing.T) {
+	w, client := outputSetup(t, "operation: '${! meta(\"op\") }'\n")
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "write", `{"id":"dk1","email":"a@b.com"}`)}))
+	require.NotNil(t, outputRead(t, client, "dk1"))
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "delete", `{"id":"dk1"}`)}))
+	assert.Nil(t, outputRead(t, client, "dk1"))
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "delete", `{"id":"dk1"}`)}))
+}
+
+func TestIntegrationCreateOnlyFailsWhenExists(t *testing.T) {
+	w, client := outputSetup(t, "operation: create_only\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"co1","a":1}`)}))
+
+	again := service.MessageBatch{msg(t, `{"id":"co1","a":2}`)}
+	indexer := again.Index()
+	err := w.WriteBatch(t.Context(), again)
+	require.Error(t, err)
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "create_only")
+
+	rec := outputRead(t, client, "co1")
+	require.NotNil(t, rec)
+	assert.Equal(t, 1, rec.Bins["a"], "the failed create_only must not overwrite the record")
+}
+
+func TestIntegrationUpdateOnlyFailsWhenMissing(t *testing.T) {
+	w, client := outputSetup(t, "operation: update_only\n")
+
+	batch := service.MessageBatch{msg(t, `{"id":"uo1","a":1}`)}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "update_only")
+	assert.Nil(t, outputRead(t, client, "uo1"))
+}
+
 func TestIntegrationPartialFailure(t *testing.T) {
 	w, client := outputSetup(t, "")
 
@@ -473,6 +879,7 @@ func TestIntegrationPartialFailure(t *testing.T) {
 		msg(t, `{"id":"p3","ok":1}`),
 	}
 
+	indexer := batch.Index()
 	err := w.WriteBatch(t.Context(), batch)
 	require.Error(t, err)
 
@@ -480,8 +887,11 @@ func TestIntegrationPartialFailure(t *testing.T) {
 	require.ErrorAs(t, err, &batchErr)
 	assert.Equal(t, 1, batchErr.IndexedErrors(), "only the bad message should be failed")
 	assert.Contains(t, err.Error(), "1 of 3")
+	// The name is rejected while planning the batch, before any record is sent.
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "exceeds the Aerospike limit")
 
 	assert.NotNil(t, outputRead(t, client, "p1"))
+	assert.Nil(t, outputRead(t, client, "p2"))
 	assert.NotNil(t, outputRead(t, client, "p3"))
 }
 

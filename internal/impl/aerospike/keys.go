@@ -106,6 +106,17 @@ func parseKeyConfig(conf *service.ParsedConfig) (*keyConfig, error) {
 	if k.KeyEncoding, err = conf.FieldString(fieldKeyEncoding); err != nil {
 		return nil, err
 	}
+
+	if ns, ok := k.Namespace.Static(); ok {
+		if err := validateNamespaceName(ns); err != nil {
+			return nil, fmt.Errorf("field '%v': %w", fieldNamespace, err)
+		}
+	}
+	if set, ok := k.Set.Static(); ok {
+		if err := validateSetName(set); err != nil {
+			return nil, fmt.Errorf("field '%v': %w", fieldSet, err)
+		}
+	}
 	return k, nil
 }
 
@@ -228,7 +239,7 @@ func validateNamespaceName(name string) error {
 	// Interpolation of a missing field yields the literal "null", which would
 	// otherwise look like a namespace that does not exist.
 	if name == "null" {
-		return errors.New(`resolved to "null", which is not a usable namespace; the source field is probably missing from this message`)
+		return errors.New(`resolved to "null"; the source field is probably missing`)
 	}
 	if len(name) > maxNamespaceNameLen {
 		return fmt.Errorf("namespace %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), maxNamespaceNameLen)
@@ -241,11 +252,10 @@ func validateSetName(name string) error {
 	if name == "" {
 		return nil
 	}
-	// The null set is an empty name. The literal "null" is what a missing
-	// interpolated field becomes, and writing it would create a set that can
-	// only be removed by truncating.
+	// The literal "null" is what a missing interpolated field becomes, and
+	// writing it would create a set that can only be removed by truncating.
 	if name == "null" {
-		return errors.New(`resolved to "null", which is not a usable set name; a missing field stringifies to that, and the null set is an empty name`)
+		return errors.New(`resolved to "null"; the source field is probably missing`)
 	}
 	if len(name) > maxSetNameLen {
 		return fmt.Errorf("set name %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), maxSetNameLen)
