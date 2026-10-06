@@ -54,12 +54,12 @@ func keyFields(keyExamples ...string) []*service.ConfigField {
 
 	return []*service.ConfigField{
 		service.NewInterpolatedStringField(fieldNamespace).
-			Description("The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime.").
+			Description("The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime. A resolved value of `null` is rejected, because a missing interpolated field stringifies to that.").
 			Example("test").
 			Example(`${! meta("as_namespace") }`),
 
 		service.NewInterpolatedStringField(fieldSet).
-			Description("The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value such as a Kafka topic name. Leave empty for the null set.").
+			Description("The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value such as a Kafka topic name. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.").
 			Default("").
 			Example("users").
 			Example(`${! meta("as_set") }`),
@@ -67,7 +67,7 @@ func keyFields(keyExamples ...string) []*service.ConfigField {
 		keyField,
 
 		service.NewStringEnumField(fieldKeyType, "string", "int", "bytes").
-			Description("How to interpret the resolved `key`. Aerospike addresses records by a digest of the key, and the digest differs between a string `\"123\"` and an integer `123` — so this must match whatever else reads or writes these records.").
+			Description("How to interpret the resolved `key`. Aerospike addresses records by a digest of the key, and the digest differs between a string `\"123\"` and an integer `123`. This must match whatever else reads or writes these records.").
 			Default("string"),
 
 		service.NewStringEnumField(fieldKeyEncoding, "utf8", "base64", "hex").
@@ -105,6 +105,17 @@ func parseKeyConfig(conf *service.ParsedConfig) (*keyConfig, error) {
 	}
 	if k.KeyEncoding, err = conf.FieldString(fieldKeyEncoding); err != nil {
 		return nil, err
+	}
+
+	if ns, ok := k.Namespace.Static(); ok {
+		if err := validateNamespaceName(ns); err != nil {
+			return nil, fmt.Errorf("field '%v': %w", fieldNamespace, err)
+		}
+	}
+	if set, ok := k.Set.Static(); ok {
+		if err := validateSetName(set); err != nil {
+			return nil, fmt.Errorf("field '%v': %w", fieldSet, err)
+		}
 	}
 	return k, nil
 }
@@ -225,6 +236,11 @@ func validateNamespaceName(name string) error {
 	if name == "" {
 		return errors.New("resolved to an empty string")
 	}
+	// Interpolation of a missing field yields the literal "null", which would
+	// otherwise look like a namespace that does not exist.
+	if name == "null" {
+		return errors.New(`resolved to "null"; the source field is probably missing`)
+	}
 	if len(name) > maxNamespaceNameLen {
 		return fmt.Errorf("namespace %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), maxNamespaceNameLen)
 	}
@@ -235,6 +251,11 @@ func validateNamespaceName(name string) error {
 func validateSetName(name string) error {
 	if name == "" {
 		return nil
+	}
+	// The literal "null" is what a missing interpolated field becomes, and
+	// writing it would create a set that can only be removed by truncating.
+	if name == "null" {
+		return errors.New(`resolved to "null"; the source field is probably missing`)
 	}
 	if len(name) > maxSetNameLen {
 		return fmt.Errorf("set name %q is %d bytes, which exceeds the Aerospike limit of %d", name, len(name), maxSetNameLen)

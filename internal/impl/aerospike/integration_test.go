@@ -45,7 +45,7 @@ import (
 )
 
 const (
-	aerospikeImage         = "aerospike/aerospike-server:8.1"
+	aerospikeImage         = "aerospike/aerospike-server:8.2"
 	integrationNamespace   = "test"
 	integrationOutputSet   = "rpa_e2e"
 	integrationLookupSet   = "rpa_lookup"
@@ -305,6 +305,9 @@ func TestIntegrationWriteAndRead(t *testing.T) {
 	assert.Equal(t, 10, rec.Bins["score"])
 	assert.Equal(t, 0.5, rec.Bins["ratio"])
 	assert.Equal(t, []any{"x", "y"}, rec.Bins["tags"])
+	// The key field addresses the record and must not be stored again as a bin.
+	assert.NotContains(t, rec.Bins, "id")
+	assert.Len(t, rec.Bins, 4)
 }
 
 // TestIntegrationCoalescing proves the merge rules against a real server: three

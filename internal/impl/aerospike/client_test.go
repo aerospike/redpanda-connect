@@ -319,6 +319,10 @@ func TestValidateNamespaceName(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty")
 
+	err = validateNamespaceName("null")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "null")
+
 	err = validateNamespaceName(strings.Repeat("n", maxNamespaceNameLen+1))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds the Aerospike limit of 31")
@@ -428,6 +432,42 @@ key: '${! json("id") }'
 `, msg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "colon")
+}
+
+func TestKeyRejectsNullSetName(t *testing.T) {
+	msg := service.NewMessage([]byte(`{"id":"u1"}`))
+	msg.MetaSet("set", "null")
+
+	_, err := resolveKey(t, `
+namespace: test
+set: '${! meta("set") }'
+key: '${! json("id") }'
+`, msg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "null")
+}
+
+func TestKeyRejectsStaticNamesAtParse(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{name: "null namespace", yaml: "namespace: 'null'\nkey: k\n", want: fieldNamespace},
+		{name: "empty namespace", yaml: "namespace: ''\nkey: k\n", want: fieldNamespace},
+		{name: "null set", yaml: "namespace: test\nset: 'null'\nkey: k\n", want: fieldSet},
+		{name: "colon in set", yaml: "namespace: test\nset: 'a:b'\nkey: k\n", want: fieldSet},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseKeyYAML(t, tc.yaml)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "field '"+tc.want+"'")
+		})
+	}
+
+	_, err := parseKeyYAML(t, "namespace: '${! meta(\"ns\") }'\nset: '${! meta(\"set\") }'\nkey: k\n")
+	require.NoError(t, err, "interpolated names are only checked per message")
 }
 
 func TestKeyAllowsEmptySet(t *testing.T) {
