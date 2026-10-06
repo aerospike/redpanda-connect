@@ -156,7 +156,76 @@ auth_mode: pki
 `)
 		require.NoError(t, err)
 		assert.Equal(t, as.AuthModePKI, c.Policy.AuthMode)
+		assert.Empty(t, c.Policy.User)
+		assert.Empty(t, c.Policy.Password)
 	})
+	t.Run("no credentials does not log in", func(t *testing.T) {
+		c, err := parseClientYAML(t, `hosts: ["localhost:3000"]`)
+		require.NoError(t, err)
+		assert.Empty(t, c.Policy.User)
+		assert.Empty(t, c.Policy.Password)
+		assert.False(t, c.Policy.RequiresAuthentication())
+	})
+	t.Run("external with tls", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["localhost:3000"]
+auth_mode: external
+credentials:
+  username: ldap-user
+  password: secret
+tls:
+  enabled: true
+`)
+		require.NoError(t, err)
+		assert.Equal(t, as.AuthModeExternal, c.Policy.AuthMode)
+		assert.Equal(t, "ldap-user", c.Policy.User)
+		assert.Equal(t, "secret", c.Policy.Password)
+		require.NotNil(t, c.Policy.TlsConfig)
+	})
+}
+
+// External login sends a clear password, so the client refuses it unless TLS is on.
+// The check happens before any seed is dialed.
+func TestLoginExternalRequiresTLS(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: ["127.0.0.1:1"]
+namespace: test
+set: users
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+connect_timeout: 2s
+auth_mode: external
+credentials:
+  username: ldap-user
+  password: secret
+`)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	err := w.Connect(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "External Authentication requires TLS")
+}
+
+// PKI login uses the client certificate. A username or password is rejected
+// before any seed is dialed.
+func TestLoginPKIRejectsPassword(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: ["127.0.0.1:1"]
+namespace: test
+set: users
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+connect_timeout: 2s
+auth_mode: pki
+credentials:
+  username: rpcnpki
+  password: secret
+`)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	err := w.Connect(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Password authentication is disabled")
 }
 
 func TestParseHost(t *testing.T) {

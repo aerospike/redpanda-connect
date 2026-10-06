@@ -25,7 +25,7 @@ line, not the server's. Docker Desktop project name:
 |---|---|---|---|
 | `as-ee-1` | `127.0.0.1:3100` | `AEROSPIKE_EE_HOSTS` | Unsecured 2-node cluster, RF=2, cluster-name `aero-integ-redpanda-ee` |
 | `as-ee-2` | `127.0.0.1:3110` | (same list) | Peer of node 1; namespaces `test` (AP) and `sc` (strong consistency) |
-| `as-ee-sec` | `127.0.0.1:3200` plaintext, `127.0.0.1:clusterA:4333` TLS | `AEROSPIKE_SEC_HOST`, `AEROSPIKE_TLS_HOST` | Separate cluster `aero-integ-redpanda-ee-sec`; user `rpcn` / `rpcnpass` |
+| `as-ee-sec` | `127.0.0.1:3200` plaintext, `127.0.0.1:clusterA:4333` TLS | `AEROSPIKE_SEC_HOST`, `AEROSPIKE_TLS_HOST` | Separate cluster `aero-integ-redpanda-ee-sec`. User `rpcn` / `rpcnpass` (also PKI; certificate `client.pem` CN `rpcn`). The TLS port requires that client certificate. |
 | `as-ee-tools` | Compose network only | — | `aql`, `asadm`, and `asinfo` |
 
 On Docker Desktop, configs use loopback `access-address` / `access-port`.
@@ -130,23 +130,23 @@ docker exec as-ee-tools aql-ee -c "SELECT * FROM test.rpa_ee WHERE PK='ttl-gone'
 
 Present after the write; gone after TTL + NSUP. Faster TTL checks (`24H`, `1D`, invalid `24X`) stay on CE `TestIntegrationTTL*`.
 
-Auth tests use `rpcn` / `rpcnpass`. If user create failed, the image may use
-a different admin password:
+Auth tests use `rpcn` / `rpcnpass`. That account lives in `smd/ee-sec`
+(`security.smd`) so a recreate keeps it. The auth tests also create it when
+it is missing. If create failed, the image may use a different admin password:
 
 ```bash
 docker exec -it as-ee-sec asadm -U admin -P '<admin-password>' --enable \
   -e "manage acl create user rpcn password rpcnpass roles read-write sys-admin"
 ```
 
-If `TestEEStrongConsistency` fails with `not connected`, the `sc` roster is
-naming node ids from a previous start. Wait for both unsecured nodes, then
-restage it onto the nodes that are up now:
-
-```bash
-docker exec as-ee-1 asinfo -v statistics | tr ';' '\n' | grep cluster_size
-docker exec as-ee-1 asadm --enable -e "manage roster stage observed ns sc"
-docker exec as-ee-1 asadm --enable -e "manage recluster"
-```
+`as-ee-1` and `as-ee-2` pin `node-id` in their config, and `smd/` keeps the
+`sc` roster across a container recreate. Namespace `sc` is memory-backed, so
+a restart still marks all 4096 partitions dead until `revive:namespace=sc` is
+sent to both nodes and `recluster:` is sent to the principal. `./up.sh` and
+`TestEEStrongConsistency` do that, and they restage the roster when it names
+node ids that are gone. Only the principal accepts `recluster`. Copy
+`/opt/aerospike/smd` out of each container before the first recreate that
+attaches `smd/`. An empty mount hides the roster the container already has.
 
 ## Stop
 
