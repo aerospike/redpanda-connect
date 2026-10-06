@@ -77,6 +77,10 @@ bins: 'root = this.without("id")'
 	t.Cleanup(client.Close)
 
 	require.NoError(t, client.Truncate(nil, namespace, eeSet, nil))
+	// Truncate returns when the command is accepted, not when the set is empty.
+	// A write in that window is removed again, so the following read misses a
+	// record the batch call just reported as stored.
+	waitUntilSetEmpty(t, client, namespace, eeSet)
 	return w, client
 }
 
@@ -135,6 +139,43 @@ func nsStat(t *testing.T, client *as.Client, namespace, stat string) int64 {
 		}
 	}
 	return total
+}
+
+// waitUntilSetEmpty blocks until every node has finished truncating this set.
+// objects and tombstones are per node; with replication-factor 2 both copies
+// have to be gone before a new write is safe from the truncate cutoff.
+func waitUntilSetEmpty(t *testing.T, client *as.Client, namespace, set string) {
+	t.Helper()
+
+	cmd := "sets/" + namespace + "/" + set
+	require.Eventually(t, func() bool {
+		nodes := client.GetNodes()
+		if len(nodes) == 0 {
+			return false
+		}
+		for _, node := range nodes {
+			info, err := node.RequestInfo(as.NewInfoPolicy(), cmd)
+			if err != nil {
+				return false
+			}
+			raw := info[cmd]
+			if raw == "" {
+				continue
+			}
+			fields := map[string]string{}
+			for field := range strings.SplitSeq(raw, ":") {
+				name, value, ok := strings.Cut(field, "=")
+				if ok {
+					fields[name] = value
+				}
+			}
+			if fields["truncating"] == "true" || fields["objects"] != "0" || fields["tombstones"] != "0" {
+				return false
+			}
+		}
+		return true
+	}, 30*time.Second, 50*time.Millisecond,
+		"truncate of %s.%s did not finish on every node", namespace, set)
 }
 
 // settledStat waits for a namespace statistic to stop moving. Truncate reclaims
