@@ -25,7 +25,7 @@ line, not the server's. Docker Desktop project name:
 |---|---|---|---|
 | `as-ee-1` | `127.0.0.1:3100` | `AEROSPIKE_EE_HOSTS` | Unsecured 2-node cluster, RF=2, cluster-name `aero-integ-redpanda-ee` |
 | `as-ee-2` | `127.0.0.1:3110` | (same list) | Peer of node 1; namespaces `test` (AP) and `sc` (strong consistency) |
-| `as-ee-sec` | `127.0.0.1:3200` plaintext, `127.0.0.1:clusterA:4333` TLS | `AEROSPIKE_SEC_HOST`, `AEROSPIKE_TLS_HOST` | Separate cluster `aero-integ-redpanda-ee-sec`; user `rpcn` / `rpcnpass` |
+| `as-ee-sec` | `127.0.0.1:3200` plaintext, `127.0.0.1:clusterA:4333` TLS | `AEROSPIKE_SEC_HOST`, `AEROSPIKE_TLS_HOST` | Separate cluster `aero-integ-redpanda-ee-sec`; user `rpcn` / `rpcnpass`. The TLS port requires `client.pem` (CN `rpcn`). |
 | `as-ee-tools` | Compose network only | — | `aql`, `asadm`, and `asinfo` |
 
 On Docker Desktop, configs use loopback `access-address` / `access-port`.

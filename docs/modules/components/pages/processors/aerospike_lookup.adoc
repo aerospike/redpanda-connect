@@ -76,6 +76,7 @@ aerospike_lookup:
     root_cas: ""
     root_cas_file: ""
     client_certs: []
+  cert_refresh_interval: 0s
   namespace: test # No default (required)
   set: ""
   key: ${! json("user_id") } # No default (required)
@@ -481,6 +482,15 @@ password: foo
 
 password: ${KEY_PASSWORD}
 ```
+
+=== `cert_refresh_interval`
+
+How often to re-read `tls.root_cas_file` and the `cert_file` and `key_file` paths under `tls.client_certs`. The paths do not change; only new contents of those files are picked up, and only by connections opened after the next check. Connections already in the pool stay up until they close on their own. A file that cannot be read or parsed is skipped and the previous material stays in use. Inline PEM values are not re-read. `0s` disables the check.
+
+
+*Type*: `string`
+
+*Default*: `"0s"`
 
 === `namespace`
 
