@@ -1,0 +1,48 @@
+# Route Kafka topics to Aerospike namespaces and sets on one cluster.
+# Producers and JSON stay the same. There is no topics: tree on output.aerospike.
+#
+# A. Topic name is the namespace (topic "test" -> ns test, topic "payments" -> ns payments):
+#      namespace: '${! meta("kafka_topic") }'
+#      set: users
+#      key: '${! meta("kafka_key") }'
+#      bins: 'root = this'
+#
+# B and D. Two topics, one namespace, set name is the topic (users and orders -> ns test):
+#      namespace: test
+#      set: '${! meta("kafka_topic") }'
+#
+# C. One topic, namespace and set chosen by JSON fields:
+#      {"id":"e-1","namespace_name":"payments","set_name":"clicks","n":1}
+#      namespace: '${! json("namespace_name") }'
+#      set: '${! json("set_name") }'
+#
+# A small fixed topic list is fine as a set name. Do not interpolate an unbounded value.
+# The runnable pipeline below is case A for test and payments, and case C for events.
+
+input:
+  redpanda:
+    seed_brokers: [ "127.0.0.1:19092" ]
+    topics: [ test, payments, events ]
+    consumer_group: aerospike-sink
+
+output:
+  switch:
+    cases:
+      - check: meta("kafka_topic") == "events"
+        output:
+          aerospike:
+            hosts: [ "127.0.0.1:3000" ]
+            namespace: '${! json("namespace_name") }'
+            set: '${! json("set_name") }'
+            key: '${! json("id") }'
+            bins: 'root = this.without("id", "namespace_name", "set_name")'
+            operation: replace
+      - check: meta("kafka_topic") == "test" || meta("kafka_topic") == "payments"
+        output:
+          aerospike:
+            hosts: [ "127.0.0.1:3000" ]
+            namespace: '${! meta("kafka_topic") }'
+            set: users
+            key: '${! meta("kafka_key") }'
+            bins: 'root = this'
+            operation: replace

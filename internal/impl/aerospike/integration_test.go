@@ -310,25 +310,60 @@ func TestIntegrationWriteAndRead(t *testing.T) {
 	assert.Len(t, rec.Bins, 4)
 }
 
-// TestIntegrationJSONUserRecord is the kafka-inbound key-field + bins case:
-// a JSON object becomes one record whose primary key is user_id and whose
-// bins are the remaining fields.
-func TestIntegrationJSONUserRecord(t *testing.T) {
+// TestIntegrationTopicRoutesToSet writes one batch to two sets. The set name
+// is the Kafka topic, which is how a fixed topic list shares one namespace.
+func TestIntegrationTopicRoutesToSet(t *testing.T) {
 	w, client := outputSetup(t, `
-key: '${! json("user_id") }'
-bins: 'root = this.without("user_id")'
-operation: replace
+set: '${! meta("kafka_topic") }'
 `)
+	for _, set := range []string{"route_users", "route_orders"} {
+		require.NoError(t, client.Truncate(nil, integrationNamespace, set, nil))
+	}
+
+	users := msg(t, `{"id":"u-42","email":"a@b.com"}`)
+	users.MetaSet("kafka_topic", "route_users")
+	orders := msg(t, `{"id":"o-1","sku":"book"}`)
+	orders.MetaSet("kafka_topic", "route_orders")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{users, orders}))
+
+	read := func(set, id string) *as.Record {
+		t.Helper()
+		key, err := as.NewKey(integrationNamespace, set, id)
+		require.NoError(t, err)
+		rec, asErr := client.Get(nil, key)
+		require.NoError(t, asErr)
+		return rec
+	}
+
+	assert.Equal(t, "a@b.com", read("route_users", "u-42").Bins["email"])
+	assert.Equal(t, "book", read("route_orders", "o-1").Bins["sku"])
+	assert.Nil(t, outputRead(t, client, "u-42"), "the default set must not receive a routed write")
+}
+
+// TestIntegrationJSONFieldRoutesNamespaceAndSet resolves both the namespace
+// and the set from the message body. The community server only declares
+// namespace test, so that is the only namespace this can write.
+func TestIntegrationJSONFieldRoutesNamespaceAndSet(t *testing.T) {
+	w, client := outputSetup(t, `
+namespace: '${! json("namespace_name") }'
+set: '${! json("set_name") }'
+bins: 'root = this.without("id", "namespace_name", "set_name")'
+`)
+	const set = "route_clicks"
+	require.NoError(t, client.Truncate(nil, integrationNamespace, set, nil))
 
 	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
-		msg(t, `{"user_id":"u-42","email":"a@b.com","plan":"pro"}`),
+		msg(t, `{"id":"e-1","namespace_name":"test","set_name":"route_clicks","n":1}`),
 	}))
 
-	rec := outputRead(t, client, "u-42")
-	require.NotNil(t, rec)
-	assert.Equal(t, "a@b.com", rec.Bins["email"])
-	assert.Equal(t, "pro", rec.Bins["plan"])
-	assert.NotContains(t, rec.Bins, "user_id")
+	key, err := as.NewKey(integrationNamespace, set, "e-1")
+	require.NoError(t, err)
+	rec, asErr := client.Get(nil, key)
+	require.NoError(t, asErr)
+	assert.Equal(t, 1, rec.Bins["n"])
+	assert.NotContains(t, rec.Bins, "namespace_name")
+	assert.NotContains(t, rec.Bins, "set_name")
+	assert.Nil(t, outputRead(t, client, "e-1"), "the default set must not receive a routed write")
 }
 
 // TestIntegrationCoalescing proves the merge rules against a real server: three

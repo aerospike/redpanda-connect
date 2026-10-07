@@ -73,8 +73,8 @@ counter, or patch a map in place — those need a modeled operate in application
 Treat ` + "`bins`" + ` as a schema contract the server will not enforce: keep bin names and types
 stable, and cap nested lists and maps in Bloblang (` + "`this.events.slice(0, 100)`" + `). Aerospike
 rewrites the entire record on every update, so the bulk of records should stay in
-single-digit KiB. Sets are a name, not a shard key — do not interpolate an unbounded
-value such as a Kafka topic. Primary-key access is the only read this component offers;
+single-digit KiB. Sets are a name, not a shard key. Do not interpolate an unbounded
+value. A small fixed list of topic names is fine. Primary-key access is the only read this component offers;
 do not treat lookup as a join.
 
 ### Batching and hot keys
@@ -267,6 +267,37 @@ output:
       enabled: true
       bin: _off
       value: '${! meta("kafka_offset") }'
+`,
+		).
+		Example(
+			"Route topics to namespaces and sets",
+			"One cluster, many namespace and set combinations. The topic name can be the namespace, or a switch can send each topic to a fixed namespace and set. A JSON field can choose the namespace or the set. A compacted topic still keys the record from the Kafka message key.",
+			`
+input:
+  redpanda:
+    seed_brokers: [ "localhost:19092" ]
+    topics: [ "test", "payments", "events" ]
+    consumer_group: "aerospike-sink"
+
+output:
+  switch:
+    cases:
+      - check: meta("kafka_topic") == "events"
+        output:
+          aerospike:
+            hosts: [ "localhost:3000" ]
+            namespace: '${! json("namespace_name") }'
+            set: '${! json("set_name") }'
+            key: '${! json("id") }'
+            bins: 'root = this.without("id", "namespace_name", "set_name")'
+      - check: meta("kafka_topic") == "test" || meta("kafka_topic") == "payments"
+        output:
+          aerospike:
+            hosts: [ "localhost:3000" ]
+            namespace: '${! meta("kafka_topic") }'
+            set: users
+            key: '${! meta("kafka_key") }'
+            bins: 'root = this'
 `,
 		)
 }

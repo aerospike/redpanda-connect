@@ -288,6 +288,46 @@ operation: replace
 	assert.NotContains(t, op.bins, "user_id")
 }
 
+func TestMapMessageTopicIsNamespace(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: '${! meta("kafka_topic") }'
+set: users
+key: '${! meta("kafka_key") }'
+bins: 'root = this'
+`)
+
+	msg := service.NewMessage([]byte(`{"email":"a@b.com"}`))
+	msg.MetaSet("kafka_topic", "payments")
+	msg.MetaSet("kafka_key", "u-42")
+
+	op, err := mapOne(t, w, msg)
+	require.NoError(t, err)
+	assert.Equal(t, "payments", op.key.Namespace())
+	assert.Equal(t, "users", op.key.SetName())
+	assert.Equal(t, "u-42", op.key.Value().GetObject())
+	assert.Equal(t, map[string]any{"email": "a@b.com"}, op.bins)
+}
+
+func TestMapMessageNamespaceAndSetFromJSONFields(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: '${! json("namespace_name") }'
+set: '${! json("set_name") }'
+key: '${! json("id") }'
+bins: 'root = this.without("id", "namespace_name", "set_name")'
+`)
+
+	op, err := mapOne(t, w, service.NewMessage([]byte(`{"id":"e-1","namespace_name":"payments","set_name":"clicks","n":1}`)))
+	require.NoError(t, err)
+	assert.Equal(t, "payments", op.key.Namespace())
+	assert.Equal(t, "clicks", op.key.SetName())
+	assert.Equal(t, "e-1", op.key.Value().GetObject())
+	assert.Equal(t, map[string]any{"n": int64(1)}, op.bins)
+	assert.NotContains(t, op.bins, "namespace_name")
+	assert.NotContains(t, op.bins, "set_name")
+}
+
 func TestMapMessageIntKeyType(t *testing.T) {
 	w := newTestWriter(t, `
 hosts: [ "localhost:3000" ]

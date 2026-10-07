@@ -54,14 +54,18 @@ func keyFields(keyExamples ...string) []*service.ConfigField {
 
 	return []*service.ConfigField{
 		service.NewInterpolatedStringField(fieldNamespace).
-			Description("The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime. A resolved value of `null` is rejected, because a missing interpolated field stringifies to that.").
+			Description("The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime. A resolved value of `null` is rejected, because a missing interpolated field stringifies to that. Use `meta(\"kafka_topic\")` when the topic name is the namespace.").
 			Example("test").
+			Example(`${! meta("kafka_topic") }`).
+			Example(`${! json("namespace_name") }`).
 			Example(`${! meta("as_namespace") }`),
 
 		service.NewInterpolatedStringField(fieldSet).
-			Description("The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value such as a Kafka topic name. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.").
+			Description("The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value. A small fixed list, such as the topics this pipeline consumes, is fine. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.").
 			Default("").
 			Example("users").
+			Example(`${! meta("kafka_topic") }`).
+			Example(`${! json("set_name") }`).
 			Example(`${! meta("as_set") }`),
 
 		keyField,
