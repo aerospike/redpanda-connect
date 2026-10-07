@@ -268,7 +268,7 @@ func TestRosterNodeSets(t *testing.T) {
 
 	active, observed = rosterNodeSets("roster=bb917465ffbf3e6,bb91dda83feafc6:observed_nodes=BB91DDA83FEAFC6,BB917465FFBF3E6")
 	assert.Equal(t, observed, active)
-	assert.NotEqual(t, "", observed)
+	assert.NotEmpty(t, observed)
 }
 
 // nsStat sums a namespace statistic across every node, so replica-side effects
