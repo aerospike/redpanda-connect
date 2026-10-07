@@ -54,6 +54,14 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 
+# Auth tests expect user rpcn / rpcnpass. Create it before the roster step so
+# a roster failure does not leave the TLS tests with only the admin user.
+echo "creating user rpcn on as-ee-sec ..."
+docker exec as-ee-sec asadm -U admin -P admin --enable -e \
+  "manage acl create user rpcn password rpcnpass roles read-write sys-admin" || true
+docker exec as-ee-sec asadm -U admin -P admin --enable -e \
+  "manage acl grant user rpcn roles read-write sys-admin" || true
+
 # A non-null roster is not enough. After a container restart the namespace can
 # still name the previous node ids, and strong-consistency writes then fail
 # until the roster is restaged onto the nodes that are actually up.
@@ -61,26 +69,65 @@ node_set() {
   printf '%s' "$1" | tr ',' '\n' | sed '/^$/d;/^null$/d' | sort -u | paste -sd, - || true
 }
 
+# recluster is ignored unless it is sent to the current principal.
+principal_container() {
+  local c stats node principal
+  for c in as-ee-1 as-ee-2; do
+    stats="$(docker exec "$c" asinfo -v statistics 2>/dev/null || true)"
+    node="$(docker exec "$c" asinfo -v node 2>/dev/null || true)"
+    principal="$(printf '%s\n' "$stats" | tr ';' '\n' | sed -n 's/^cluster_principal=//p')"
+    if [[ -n "$node" && "$node" == "$principal" ]]; then
+      printf '%s' "$c"
+      return
+    fi
+  done
+  printf '%s' as-ee-1
+}
+
+# Memory storage has no copies after a restart, so a matching roster still
+# leaves every strong-consistency partition dead until each node is revived.
+sc_dead() {
+  local c stats
+  for c in as-ee-1 as-ee-2; do
+    stats="$(docker exec "$c" asinfo -v 'namespace/sc' 2>/dev/null || true)"
+    if ! grep -q 'dead_partitions=0;' <<<"${stats};"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 echo "staging SC roster on namespace sc ..."
 ready=0
 for _ in $(seq 1 30); do
-  roster="$(docker exec as-ee-1 asinfo -v 'roster:namespace=sc' 2>/dev/null || true)"
+  principal="$(principal_container)"
+  roster="$(docker exec "$principal" asinfo -v 'roster:namespace=sc' 2>/dev/null || true)"
   roster_nodes="${roster#roster=}"
   roster_nodes="${roster_nodes%%:*}"
   observed="${roster##*observed_nodes=}"
   observed="${observed%%:*}"
   roster_set="$(node_set "$roster_nodes")"
   observed_set="$(node_set "$observed")"
-  stats="$(docker exec as-ee-1 asinfo -v 'namespace/sc' 2>/dev/null || true)"
-  if [[ -n "$observed_set" && "$roster_set" == "$observed_set" ]] && grep -q 'ns_cluster_size=2' <<<"$stats"; then
+  stats="$(docker exec "$principal" asinfo -v 'namespace/sc' 2>/dev/null || true)"
+  observed_count=0
+  if [[ -n "$observed_set" ]]; then
+    observed_count="$(awk -F, '{print NF}' <<<"$observed_set")"
+  fi
+  if [[ "$observed_count" -eq 2 && "$roster_set" == "$observed_set" ]] && grep -q 'ns_cluster_size=2' <<<"$stats" && ! sc_dead; then
     echo "  $roster"
     ready=1
     break
   fi
-  if [[ -n "$observed_set" ]]; then
-    echo "  roster (${roster_set:-null}) does not match observed nodes ($observed_set); restaging"
-    docker exec as-ee-1 asinfo -v "roster-set:namespace=sc;nodes=$observed" >/dev/null 2>&1 || true
-    docker exec as-ee-1 asinfo -v 'recluster:' >/dev/null 2>&1 || true
+  if [[ "$observed_count" -eq 2 ]]; then
+    echo "  roster (${roster_set:-null}) observed ($observed_set); repairing on $principal"
+    if [[ "$roster_set" != "$observed_set" ]]; then
+      docker exec "$principal" asinfo -v "roster-set:namespace=sc;nodes=$observed" >/dev/null 2>&1 || true
+    fi
+    if sc_dead; then
+      docker exec as-ee-1 asinfo -v 'revive:namespace=sc' >/dev/null 2>&1 || true
+      docker exec as-ee-2 asinfo -v 'revive:namespace=sc' >/dev/null 2>&1 || true
+    fi
+    docker exec "$principal" asinfo -v 'recluster:' >/dev/null 2>&1 || true
   fi
   sleep 2
 done
@@ -88,13 +135,6 @@ if [[ "$ready" -ne 1 ]]; then
   echo "namespace sc roster does not match the live nodes" >&2
   exit 1
 fi
-
-# Auth tests expect user rpcn / rpcnpass. Default docker admin is often admin/admin.
-echo "creating user rpcn on as-ee-sec ..."
-docker exec as-ee-sec asadm -U admin -P admin --enable -e \
-  "manage acl create user rpcn password rpcnpass roles read-write sys-admin" || true
-docker exec as-ee-sec asadm -U admin -P admin --enable -e \
-  "manage acl grant user rpcn roles read-write sys-admin" || true
 
 cat <<EOF
 

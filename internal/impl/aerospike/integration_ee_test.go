@@ -560,15 +560,72 @@ func resolveTLSCA(t *testing.T, ca string) string {
 	return ""
 }
 
-// TLS needs the host spec to carry the server's tls-name, which is the
-// host:tlsname:port form the connector documents.
-func TestEETLS(t *testing.T) {
-	host := os.Getenv("AEROSPIKE_TLS_HOST")
-	ca := os.Getenv("AEROSPIKE_TLS_CA")
-	if host == "" || ca == "" {
+// tlsMaterial is the secured Enterprise node. The TLS port requires a client
+// certificate (tls-authenticate-client any). client.pem is CN rpcn.
+// client.enc.key is that key encrypted with password rpcnkey.
+func tlsMaterial(t *testing.T) (host, ca, cert, key, encKey string) {
+	t.Helper()
+	host = os.Getenv("AEROSPIKE_TLS_HOST")
+	caEnv := os.Getenv("AEROSPIKE_TLS_CA")
+	if host == "" || caEnv == "" {
 		t.Skip("AEROSPIKE_TLS_HOST/AEROSPIKE_TLS_CA unset; TLS tests need a TLS-enabled Enterprise node")
 	}
-	ca = resolveTLSCA(t, ca)
+	ca = resolveTLSCA(t, caEnv)
+	dir := filepath.Dir(ca)
+	cert = filepath.Join(dir, "client.pem")
+	key = filepath.Join(dir, "client.key")
+	encKey = filepath.Join(dir, "client.enc.key")
+	require.FileExists(t, cert, "run testdata/ee/gen-certs.sh; the TLS port requires a client certificate")
+	require.FileExists(t, key)
+	require.FileExists(t, encKey)
+	return host, ca, cert, key, encKey
+}
+
+func tlsClientYAML(ca, cert, key, keyPassword string) string {
+	passwordLine := ""
+	if keyPassword != "" {
+		passwordLine = "\n      password: " + keyPassword
+	}
+	return `
+tls:
+  enabled: true
+  root_cas_file: ` + ca + `
+  client_certs:
+    - cert_file: ` + cert + `
+      key_file: ` + key + passwordLine + `
+`
+}
+
+// TLS needs the host spec to carry the server's tls-name, which is the
+// host:tlsname:port form the connector documents. Login is still the
+// internal password. The client certificate satisfies mutual TLS.
+func TestEETLS(t *testing.T) {
+	host, ca, cert, key, _ := tlsMaterial(t)
+
+	yaml := `
+hosts: [ "` + host + `" ]
+namespace: ` + eeAPNamespace + `
+set: ` + eeSet + `
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+auth_mode: internal
+credentials:
+  username: rpcn
+  password: rpcnpass
+` + tlsClientYAML(ca, cert, key, "")
+	w := newTestWriter(t, yaml)
+	t.Cleanup(func() { _ = w.Close(context.Background()) })
+
+	require.NoError(t, w.Connect(t.Context()))
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"tls1","v":"encrypted"}`),
+	}))
+}
+
+// The TLS listener requires a client certificate. A trusted CA and a
+// password are not enough.
+func TestEETLSRejectsMissingClientCert(t *testing.T) {
+	host, ca, _, _, _ := tlsMaterial(t)
 
 	yaml := `
 hosts: [ "` + host + `" ]
@@ -587,9 +644,31 @@ tls:
 	w := newTestWriter(t, yaml)
 	t.Cleanup(func() { _ = w.Close(context.Background()) })
 
+	require.Error(t, w.Connect(t.Context()), "a connection with no client certificate must be refused")
+}
+
+// client.enc.key is client.key wrapped as encrypted PKCS#8. The password
+// decrypts it before the handshake. The server still sees the rpcn certificate.
+func TestEETLSEncryptedKey(t *testing.T) {
+	host, ca, cert, _, encKey := tlsMaterial(t)
+
+	yaml := `
+hosts: [ "` + host + `" ]
+namespace: ` + eeAPNamespace + `
+set: ` + eeSet + `
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+auth_mode: internal
+credentials:
+  username: rpcn
+  password: rpcnpass
+` + tlsClientYAML(ca, cert, encKey, "rpcnkey")
+	w := newTestWriter(t, yaml)
+	t.Cleanup(func() { _ = w.Close(context.Background()) })
+
 	require.NoError(t, w.Connect(t.Context()))
 	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
-		msg(t, `{"id":"tls1","v":"encrypted"}`),
+		msg(t, `{"id":"tls-enc","v":"encrypted-key"}`),
 	}))
 }
 

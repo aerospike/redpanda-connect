@@ -38,6 +38,32 @@ output:
         output:
           aerospike:
             hosts: [ "127.0.0.1:3000" ]
+            # Mutual TLS uses host:tlsname:port. tlsname is the server certificate name.
+            # Password login still sends credentials. The client certificate is the TLS identity.
+            # hosts: [ "as1.internal:clusterA:4333" ]
+            # auth_mode: internal
+            # credentials:
+            #   username: rpcn
+            #   password: ${AEROSPIKE_PASSWORD}
+            # tls:
+            #   enabled: true
+            #   root_cas_file: /certs/ca.pem
+            #   client_certs:
+            #     - cert_file: /certs/client.pem
+            #       key_file: /certs/client.key
+            #       # password: ${AEROSPIKE_KEY_PASSWORD}  # only when the PEM key is encrypted
+            #
+            # PKI sends no password. The certificate subject CN is the Aerospike username.
+            # auth_mode: pki
+            # tls:
+            #   enabled: true
+            #   root_cas_file: /certs/ca.pem
+            #   client_certs:
+            #     - cert_file: /certs/client.pem
+            #       key_file: /certs/client.key
+            # cert_refresh_interval: 1h
+            # Re-reads those same files when their contents change. A different filename
+            # is a config change. Connections already open keep their current session.
             cluster_name: redpanda-demo
             namespace: test
             set: users

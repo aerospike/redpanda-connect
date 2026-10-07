@@ -16,7 +16,15 @@ package aerospike
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +32,7 @@ import (
 	as "github.com/aerospike/aerospike-client-go/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/youmark/pkcs8"
 
 	"github.com/redpanda-data/benthos/v4/public/service"
 )
@@ -157,6 +166,64 @@ auth_mode: pki
 		require.NoError(t, err)
 		assert.Equal(t, as.AuthModePKI, c.Policy.AuthMode)
 	})
+}
+
+// An encrypted PKCS#8 key is decrypted while the client config is parsed.
+// A wrong password fails before any seed is dialed.
+func TestClientCertPassword(t *testing.T) {
+	const password = "right-secret"
+	certPEM, keyPEM := encryptedPKCS8Key(t, password)
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "client.pem")
+	keyPath := filepath.Join(dir, "client.key")
+	require.NoError(t, os.WriteFile(certPath, certPEM, 0o600))
+	require.NoError(t, os.WriteFile(keyPath, keyPEM, 0o600))
+
+	yaml := `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+  client_certs:
+    - cert_file: ` + certPath + `
+      key_file: ` + keyPath + `
+      password: ` + password + `
+`
+	c, err := parseClientYAML(t, yaml)
+	require.NoError(t, err)
+	require.NotNil(t, c.Policy.TlsConfig)
+	require.NotEmpty(t, c.Policy.TlsConfig.Certificates)
+
+	yaml = `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+  client_certs:
+    - cert_file: ` + certPath + `
+      key_file: ` + keyPath + `
+      password: wrong-secret
+`
+	_, err = parseClientYAML(t, yaml)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pkcs8: incorrect password")
+}
+
+func encryptedPKCS8Key(t *testing.T, password string) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "rpcn"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	enc, err := pkcs8.ConvertPrivateKeyToPKCS8(key, []byte(password))
+	require.NoError(t, err)
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "ENCRYPTED PRIVATE KEY", Bytes: enc})
+	return certPEM, keyPEM
 }
 
 func TestParseHost(t *testing.T) {

@@ -44,6 +44,7 @@ const (
 	fieldCredentialsUsername  = "username"
 	fieldCredentialsPassword  = "password"
 	fieldTLS                  = "tls"
+	fieldCertRefreshInterval  = "cert_refresh_interval"
 	fieldAuthMode             = "auth_mode"
 
 	// defaultServicePort is the Aerospike client service port.
@@ -126,14 +127,20 @@ func clientFields() []*service.ConfigField {
 			Advanced(),
 
 		service.NewTLSToggledField(fieldTLS),
+
+		service.NewDurationField(fieldCertRefreshInterval).
+			Description("How often to re-read `tls.root_cas_file` and the `cert_file` and `key_file` paths under `tls.client_certs`. The paths do not change; only new contents of those files are picked up, and only by connections opened after the next check. Connections already in the pool stay up until they close on their own. A file that cannot be read or parsed is skipped and the previous material stays in use. Inline PEM values are not re-read. `0s` disables the check.").
+			Default("0s").
+			Advanced(),
 	}
 }
 
 // clientConfig is the parsed connection configuration.
 type clientConfig struct {
-	Hosts  []*as.Host
-	Policy *as.ClientPolicy
-	WarmUp bool
+	Hosts      []*as.Host
+	Policy     *as.ClientPolicy
+	WarmUp     bool
+	tlsRefresh *tlsRefresher
 }
 
 // sizePoolForConcurrency gives the connection pool a floor matching the number
@@ -247,6 +254,20 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 	}
 	if tlsEnabled {
 		c.Policy.TlsConfig = tlsConf
+	}
+
+	interval, err := conf.FieldDuration(fieldCertRefreshInterval)
+	if err != nil {
+		return nil, err
+	}
+	if interval < 0 {
+		return nil, fmt.Errorf("field '%v' must not be negative", fieldCertRefreshInterval)
+	}
+	if tlsEnabled && interval > 0 {
+		c.tlsRefresh, err = newTLSRefresher(conf, tlsConf, c.Hosts, c.Policy.ClusterName, interval)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return c, nil
@@ -387,8 +408,9 @@ type connection struct {
 	conf *clientConfig
 	log  *service.Logger
 
-	mu     sync.RWMutex
-	client *as.Client
+	mu          sync.RWMutex
+	client      *as.Client
+	refreshStop func()
 }
 
 // newConnection returns an unconnected handle. Call connect before issuing commands.
@@ -406,6 +428,7 @@ func (c *connection) connect(ctx context.Context) error {
 	defer c.mu.Unlock()
 
 	if c.client != nil && c.client.IsConnected() {
+		c.startTLSRefresh()
 		return nil
 	}
 	if c.client != nil {
@@ -461,6 +484,7 @@ func (c *connection) connect(ctx context.Context) error {
 			return fmt.Errorf("connecting to aerospike cluster: %w", o.err)
 		}
 		c.client = o.client
+		c.startTLSRefresh()
 		if c.log != nil {
 			c.log.Infof("Connected to Aerospike cluster with %v node(s)", len(o.client.GetNodes()))
 		}
@@ -474,7 +498,12 @@ func (c *connection) close(ctx context.Context) error {
 	c.mu.Lock()
 	client := c.client
 	c.client = nil
+	stopRefresh := c.refreshStop
+	c.refreshStop = nil
 	c.mu.Unlock()
+	if stopRefresh != nil {
+		stopRefresh()
+	}
 	if client == nil {
 		return nil
 	}
@@ -490,6 +519,15 @@ func (c *connection) close(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// startTLSRefresh starts the certificate poller once for this connection.
+// The caller holds c.mu. Reloading certificates does not close the client.
+func (c *connection) startTLSRefresh() {
+	if c.conf == nil || c.conf.tlsRefresh == nil || c.refreshStop != nil {
+		return
+	}
+	c.refreshStop = c.conf.tlsRefresh.start(c.log)
 }
 
 // asClient returns the live client, or nil when the component is not connected.
