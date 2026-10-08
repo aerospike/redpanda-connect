@@ -310,8 +310,10 @@ func TestIntegrationWriteAndRead(t *testing.T) {
 	assert.Len(t, rec.Bins, 4)
 }
 
-// TestIntegrationTopicRoutesToSet writes one batch to two sets. The set name
-// is the Kafka topic, which is how a fixed topic list shares one namespace.
+// TestIntegrationTopicRoutesToSet writes one batch to two sets under one user
+// key. The set name is the Kafka topic, which is how a fixed topic list shares
+// one namespace. The coalescing key includes the set, so the two messages stay
+// two records.
 func TestIntegrationTopicRoutesToSet(t *testing.T) {
 	w, client := outputSetup(t, `
 set: '${! meta("kafka_topic") }'
@@ -320,13 +322,14 @@ set: '${! meta("kafka_topic") }'
 		require.NoError(t, client.Truncate(nil, integrationNamespace, set, nil))
 	}
 
-	users := msg(t, `{"id":"u-42","email":"a@b.com"}`)
+	const id = "u-42"
+	users := msg(t, `{"id":"`+id+`","email":"a@b.com"}`)
 	users.MetaSet("kafka_topic", "route_users")
-	orders := msg(t, `{"id":"o-1","sku":"book"}`)
+	orders := msg(t, `{"id":"`+id+`","sku":"book"}`)
 	orders.MetaSet("kafka_topic", "route_orders")
 	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{users, orders}))
 
-	read := func(set, id string) *as.Record {
+	read := func(set string) *as.Record {
 		t.Helper()
 		key, err := as.NewKey(integrationNamespace, set, id)
 		require.NoError(t, err)
@@ -335,9 +338,13 @@ set: '${! meta("kafka_topic") }'
 		return rec
 	}
 
-	assert.Equal(t, "a@b.com", read("route_users", "u-42").Bins["email"])
-	assert.Equal(t, "book", read("route_orders", "o-1").Bins["sku"])
-	assert.Nil(t, outputRead(t, client, "u-42"), "the default set must not receive a routed write")
+	usersRec := read("route_users")
+	ordersRec := read("route_orders")
+	assert.Equal(t, "a@b.com", usersRec.Bins["email"])
+	assert.NotContains(t, usersRec.Bins, "sku")
+	assert.Equal(t, "book", ordersRec.Bins["sku"])
+	assert.NotContains(t, ordersRec.Bins, "email")
+	assert.Nil(t, outputRead(t, client, id), "the default set must not receive a routed write")
 }
 
 // TestIntegrationJSONFieldRoutesNamespaceAndSet resolves both the namespace
@@ -364,6 +371,34 @@ bins: 'root = this.without("id", "namespace_name", "set_name")'
 	assert.NotContains(t, rec.Bins, "namespace_name")
 	assert.NotContains(t, rec.Bins, "set_name")
 	assert.Nil(t, outputRead(t, client, "e-1"), "the default set must not receive a routed write")
+}
+
+// TestIntegrationInvalidNamespaceFailsOneMessage writes one batch at a declared
+// namespace and a name that is not declared. Code 20 fails only the bad
+// message. The good record is stored. With auto_replay_nacks on, the failed
+// message is replayed forever, which is why the routing example wraps that
+// branch in output.fallback.
+func TestIntegrationInvalidNamespaceFailsOneMessage(t *testing.T) {
+	w, client := outputSetup(t, `
+namespace: '${! json("namespace_name") }'
+`)
+
+	batch := service.MessageBatch{
+		msg(t, `{"id":"ns20-bad","namespace_name":"not_a_namespace","v":1}`),
+		msg(t, `{"id":"ns20-ok","namespace_name":"`+integrationNamespace+`","v":1}`),
+	}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+
+	var batchErr *service.BatchError
+	require.ErrorAs(t, err, &batchErr)
+	assert.Equal(t, 1, batchErr.IndexedErrors())
+	msgErr := firstIndexedError(t, indexer, err)
+	assert.Contains(t, msgErr.Error(), "does not exist")
+	assert.Contains(t, msgErr.Error(), "code 20")
+	assert.NotNil(t, outputRead(t, client, "ns20-ok"))
+	assert.Nil(t, outputRead(t, client, "ns20-bad"))
 }
 
 // TestIntegrationCoalescing proves the merge rules against a real server: three

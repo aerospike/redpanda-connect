@@ -61,11 +61,11 @@ func keyFields(keyExamples ...string) []*service.ConfigField {
 			Example(`${! meta("as_namespace") }`),
 
 		service.NewInterpolatedStringField(fieldSet).
-			Description("The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value. A small fixed list, such as the topics this pipeline consumes, is fine. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.").
+			Description("The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value. A small fixed list, such as the topics this pipeline consumes, is fine. A payload field is only safe when the mapping throws for anything outside that list, so a bad value fails before a write can create a set. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.").
 			Default("").
 			Example("users").
 			Example(`${! meta("kafka_topic") }`).
-			Example(`${! json("set_name") }`).
+			Example(`${! if ["clicks", "views"].contains(json("set_name")) { json("set_name") } else { throw("set_name is not allowed") } }`).
 			Example(`${! meta("as_set") }`),
 
 		keyField,

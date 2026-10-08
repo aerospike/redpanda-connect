@@ -328,6 +328,39 @@ bins: 'root = this.without("id", "namespace_name", "set_name")'
 	assert.NotContains(t, op.bins, "set_name")
 }
 
+func TestMapMessageRejectsMissingNamespaceField(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: '${! json("namespace_name") }'
+set: '${! json("set_name") }'
+key: '${! json("id") }'
+bins: 'root = this.without("id", "namespace_name", "set_name")'
+`)
+
+	_, err := mapOne(t, w, service.NewMessage([]byte(`{"id":"e-1"}`)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `field 'namespace'`)
+	assert.Contains(t, err.Error(), "null")
+}
+
+func TestMapMessageRejectsSetOutsideAllowList(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: '${! if ["clicks", "views"].contains(json("set_name")) { json("set_name") } else { throw("set_name is not allowed") } }'
+key: '${! json("id") }'
+bins: 'root = this.without("id", "set_name")'
+`)
+
+	op, err := mapOne(t, w, service.NewMessage([]byte(`{"id":"e-1","set_name":"clicks","n":1}`)))
+	require.NoError(t, err)
+	assert.Equal(t, "clicks", op.key.SetName())
+
+	_, err = mapOne(t, w, service.NewMessage([]byte(`{"id":"e-1","set_name":"nope","n":1}`)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "set_name is not allowed")
+}
+
 func TestMapMessageIntKeyType(t *testing.T) {
 	w := newTestWriter(t, `
 hosts: [ "localhost:3000" ]

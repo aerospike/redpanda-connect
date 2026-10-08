@@ -102,6 +102,12 @@ redelivery of stale data to be rejected outright — enable ` + "`fencing`" + `,
 monotonic value alongside the record and guards each write with a filter expression
 evaluated on the server.
 
+A resolved namespace that is not declared on the cluster is rejected with code 20
+(` + "`INVALID_NAMESPACE`" + `) for that message only. The other messages in the batch are still
+written. The rejection does not go away on retry, so with ` + "`auto_replay_nacks`" + ` left on,
+that message is replayed forever and holds the source partition. Wrap this output in
+` + "`output.fallback`" + ` so the rejected message is sent somewhere else instead of being retried.
+
 ### What this output does not do
 
 Writes are whole-bin puts. Atomic increments, list append, and map operations are not
@@ -271,7 +277,7 @@ output:
 		).
 		Example(
 			"Route topics to namespaces and sets",
-			"One cluster, many namespace and set combinations. The topic name can be the namespace, or a switch can send each topic to a fixed namespace and set. A JSON field can choose the namespace or the set. A compacted topic still keys the record from the Kafka message key.",
+			"One cluster, many namespace and set combinations. The topic name can be the namespace, or a switch can send each topic to a fixed namespace and set. A JSON field can choose the namespace. The set is limited to a known list. The test and payments namespaces must already be declared on the server. Each branch is wrapped in output.fallback so a code 20 (INVALID_NAMESPACE) rejection is not replayed forever.",
 			`
 input:
   redpanda:
@@ -284,20 +290,30 @@ output:
     cases:
       - check: meta("kafka_topic") == "events"
         output:
-          aerospike:
-            hosts: [ "localhost:3000" ]
-            namespace: '${! json("namespace_name") }'
-            set: '${! json("set_name") }'
-            key: '${! json("id") }'
-            bins: 'root = this.without("id", "namespace_name", "set_name")'
+          fallback:
+            - aerospike:
+                hosts: [ "localhost:3000" ]
+                namespace: '${! json("namespace_name") }'
+                set: '${! if ["clicks", "views"].contains(json("set_name")) { json("set_name") } else { throw("set_name is not allowed") } }'
+                key: '${! json("id") }'
+                bins: 'root = this.without("id", "namespace_name", "set_name")'
+                operation: replace
+            - redpanda:
+                seed_brokers: [ "localhost:19092" ]
+                topic: aerospike-rejects
       - check: meta("kafka_topic") == "test" || meta("kafka_topic") == "payments"
         output:
-          aerospike:
-            hosts: [ "localhost:3000" ]
-            namespace: '${! meta("kafka_topic") }'
-            set: users
-            key: '${! meta("kafka_key") }'
-            bins: 'root = this'
+          fallback:
+            - aerospike:
+                hosts: [ "localhost:3000" ]
+                namespace: '${! meta("kafka_topic") }'
+                set: users
+                key: '${! meta("kafka_key") }'
+                bins: 'root = this'
+                operation: replace
+            - redpanda:
+                seed_brokers: [ "localhost:19092" ]
+                topic: aerospike-rejects
 `,
 		)
 }
