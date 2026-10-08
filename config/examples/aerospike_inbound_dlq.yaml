@@ -7,7 +7,10 @@
 #   13 RECORD_TOO_BIG is a server rejection.
 #   20 INVALID_NAMESPACE is a namespace that is not declared on the cluster.
 #   The other records in the batch are still written. A missing field that
-#   resolves to "null" is not code 20.
+#   resolves to "null" is not code 20. When the namespace comes from the
+#   message, leave 20 unlisted so a typo is published here instead of dropped.
+#   Several messages for one key fold into one record. A listed code
+#   acknowledges every message that folded in.
 #   21 BIN_NAME_TOO_LONG also covers a top-level name longer than 15 bytes,
 #   which is rejected here and never sent.
 #   22 FAIL_FORBIDDEN is a positive ttl written to a namespace with

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 	"github.com/aerospike/aerospike-client-go/v8/types"
@@ -73,6 +74,9 @@ type aerospikeWriter struct {
 	log         *service.Logger
 	filteredOut *service.MetricCounter
 	ignored     *service.MetricCounter
+	// ignoredTotal is the same total passed to aerospike_ignored_errors.
+	// Unit tests read it because they have no metrics registry.
+	ignoredTotal atomic.Int64
 
 	// operate, when set, replaces the live client's BatchOperate. Tests use
 	// this to exercise WriteBatch without a cluster.
@@ -138,11 +142,19 @@ func (w *aerospikeWriter) WriteBatch(ctx context.Context, batch service.MessageB
 			return service.ErrNotConnected
 		}
 
-		// Whether or not the call reported an error, every record carries its
-		// own result code — a batch "failure" usually means some subset of keys
-		// was rejected while the rest committed.
+		// A one-record rejection often comes back as the command error as well
+		// as the record code. A record left at NO_RESPONSE never received its
+		// own code, so the command code applies to it. Records that already
+		// have a code are counted once in handleRecord. An in-doubt command
+		// is not ignored. Written records (result OK) are not counted.
+		var asErr *as.AerospikeError
+		commandListed := batchErr != nil && errors.As(batchErr, &asErr) && !asErr.InDoubt && w.conf.ignores(asErr.ResultCode)
 		for i, op := range ops {
 			rec := records[i].BatchRec()
+			if commandListed && rec.ResultCode == types.NO_RESPONSE {
+				w.noteIgnored(asErr.ResultCode, rec.Key, batchErr, ignoredMessages(op))
+				continue
+			}
 			if err := w.handleRecord(rec, op); err != nil {
 				for _, idx := range op.indexes {
 					failures[idx] = err
@@ -150,22 +162,8 @@ func (w *aerospikeWriter) WriteBatch(ctx context.Context, batch service.MessageB
 			}
 		}
 
-		if batchErr != nil && len(failures) == 0 {
-			// A one-record rejection often comes back as the command error,
-			// with no per-record result code. A listed code is still an
-			// acknowledge. Anything else fails the batch.
-			var asErr *as.AerospikeError
-			if errors.As(batchErr, &asErr) && w.conf.ignores(asErr.ResultCode) {
-				for _, op := range ops {
-					n := len(op.indexes)
-					if n == 0 {
-						n = 1
-					}
-					w.noteIgnored(asErr.ResultCode, op.key, batchErr, n)
-				}
-			} else {
-				return fmt.Errorf("aerospike batch command failed: %w", batchErr)
-			}
+		if batchErr != nil && len(failures) == 0 && !commandListed {
+			return fmt.Errorf("aerospike batch command failed: %w", batchErr)
 		}
 	}
 
@@ -254,7 +252,15 @@ func filteredOutCount(rec *as.BatchRecord, op *pendingOp) int {
 	if rec.ResultCode != types.FILTERED_OUT {
 		return 0
 	}
-	return len(op.indexes)
+	return ignoredMessages(op)
+}
+
+func ignoredMessages(op *pendingOp) int {
+	n := len(op.indexes)
+	if n == 0 {
+		n = 1
+	}
+	return n
 }
 
 func (w *aerospikeWriter) handleRecord(rec *as.BatchRecord, op *pendingOp) error {
@@ -267,12 +273,9 @@ func (w *aerospikeWriter) handleRecord(rec *as.BatchRecord, op *pendingOp) error
 		}
 	}
 	err := classifyRecord(rec, op.kind)
-	if err != nil && w.conf.ignores(rec.ResultCode) {
-		n := len(op.indexes)
-		if n == 0 {
-			n = 1
-		}
-		w.noteIgnored(rec.ResultCode, rec.Key, err, n)
+	// A result that is in doubt is not ignored. The write may already have been applied.
+	if err != nil && !rec.InDoubt && w.conf.ignores(rec.ResultCode) {
+		w.noteIgnored(rec.ResultCode, rec.Key, err, ignoredMessages(op))
 		return nil
 	}
 	return err
@@ -293,6 +296,7 @@ func (w *aerospikeWriter) acknowledgeIgnoredMapping(err error) bool {
 // noteIgnored records a dropped message. The counter is separate from
 // aerospike_filtered_out, which counts fencing discards that did reach the server.
 func (w *aerospikeWriter) noteIgnored(code types.ResultCode, key *as.Key, err error, n int) {
+	w.ignoredTotal.Add(int64(n))
 	if w.ignored != nil {
 		w.ignored.Incr(int64(n))
 	}

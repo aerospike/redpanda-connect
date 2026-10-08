@@ -16,6 +16,8 @@ package aerospike
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 	"github.com/aerospike/aerospike-client-go/v8/types"
@@ -49,6 +51,21 @@ const (
 	defaultBatchCount  = 256
 	defaultBatchPeriod = "1s"
 )
+
+// retryableIgnoreLint rejects ignore_error_codes entries that a retry could
+// still write. The same set is enforced in parseOutputConfig.
+func retryableIgnoreLint() string {
+	codes := make([]string, 0, len(retryableResultCodes))
+	for code := range retryableResultCodes {
+		codes = append(codes, strconv.Itoa(int(code)))
+	}
+	// The linter runs this mapping on the list and again on each element.
+	return `root = if this.type() == "number" {
+  if [` + strings.Join(codes, ", ") + `].contains(this) {
+    [ "code %v is retryable or not an error and must not be listed".format(this) ]
+  } else { [] }
+} else { [] }`
+}
 
 func outputSpec() *service.ConfigSpec {
 	spec := service.NewConfigSpec().
@@ -195,15 +212,18 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 
 A listed code is logged at warning, counted in `+"`aerospike_ignored_errors`"+`, and then acknowledged. That drops the message: the record is not written, the payload is not kept, and `+"`output.fallback`"+` does not see it, because this output reported success. Use this for a permanent reject such as `+"`13`"+` (`+"`RECORD_TOO_BIG`"+`), `+"`20`"+` (`+"`INVALID_NAMESPACE`"+`), `+"`21`"+` (`+"`BIN_NAME_TOO_LONG`"+`), or `+"`22`"+` (`+"`FAIL_FORBIDDEN`"+`), which would otherwise retry forever and hold the source partition.
 
-Code `+"`20`"+` is returned when the resolved namespace is not declared on the cluster. The client marks that record and still writes the other records in the batch. Namespaces cannot be created at runtime. A resolved value of `+"`null`"+` (a missing interpolated field) is rejected while the batch is planned and is not code 20.
+Code `+"`20`"+` is returned when the resolved namespace is not declared on the cluster. The client marks that record and still writes the other records in the batch. Namespaces cannot be created at runtime. A resolved value of `+"`null`"+` (a missing interpolated field) is rejected while the batch is planned and is not code 20. When the namespace comes from the message, prefer `+"`output.fallback`"+` over listing 20: a typo in that field is published instead of dropped.
 
 Code `+"`21`"+` also covers a top-level bin name longer than 15 bytes. That name is rejected while the batch is planned, so the record is never sent and the server does not return 21. A key inside a map or list is not a bin name and is not code 21.
 
 Code `+"`22`"+` is returned when a positive TTL is written to a namespace with `+"`nsup-period 0`"+`. TTL values `+"`0`"+`, `+"`-1`"+` (`+"`never`"+`), and `+"`-2`"+` (`+"`keep`"+`) do not return 22.
 
-A connection failure of the batch is still a failure. So is any mapping error other than that 15-byte name, and any result code left off this list. `+"`max_record_bytes`"+` is a separate local limit and is not code 13.`).
+With `+"`coalesce_batch_keys`"+` left on, several messages for one key become one record. A listed code on that record acknowledges every message that folded into it, including messages that would have fit on their own.
+
+A connection failure of the batch is still a failure. So is any mapping error other than that 15-byte name, a result that is in doubt, and any result code left off this list. `+"`max_record_bytes`"+` is a separate local limit and is not code 13. Codes `+"`0`"+` (`+"`OK`"+`), `+"`9`"+` (`+"`TIMEOUT`"+`), `+"`14`"+` (`+"`KEY_BUSY`"+`), and `+"`18`"+` (`+"`DEVICE_OVERLOAD`"+`) are rejected, as are other retryable and connection codes. Listing one would drop a record a retry could still write.`).
 			Default([]int{}).
 			Example([]int{13, 20, 21, 22}).
+			LintRule(retryableIgnoreLint()).
 			Advanced(),
 	)
 	spec = spec.Fields(batchPolicyFieldsWithRetries(0)...)
@@ -391,6 +411,10 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 	if len(codes) > 0 {
 		c.ignoreCodes = make(map[int]struct{}, len(codes))
 		for _, code := range codes {
+			if retryableIgnore(code) {
+				return nil, fmt.Errorf("field '%v': code %d (%s) is retryable or not an error and must not be listed",
+					fieldIgnoreErrorCodes, code, types.ResultCodeToString(types.ResultCode(code)))
+			}
 			c.ignoreCodes[code] = struct{}{}
 		}
 	}
