@@ -142,19 +142,16 @@ func (w *aerospikeWriter) WriteBatch(ctx context.Context, batch service.MessageB
 			return service.ErrNotConnected
 		}
 
-		// A one-record rejection often comes back as the command error as well
-		// as the record code. A record left at NO_RESPONSE never received its
-		// own code, so the command code applies to it. Records that already
-		// have a code are counted once in handleRecord. An in-doubt command
-		// is not ignored. Written records (result OK) are not counted.
+		// A one-record rejection comes back as the command error and as the
+		// record code. handleRecord counts that record. When every record was
+		// accepted or ignored, a listed command error must not fail the batch.
+		// A record still at NO_RESPONSE keeps its own result. After a write
+		// error the client marks those records in doubt, and errors.As reports
+		// only the first node error, so that code can belong to another node.
 		var asErr *as.AerospikeError
 		commandListed := batchErr != nil && errors.As(batchErr, &asErr) && !asErr.InDoubt && w.conf.ignores(asErr.ResultCode)
 		for i, op := range ops {
 			rec := records[i].BatchRec()
-			if commandListed && rec.ResultCode == types.NO_RESPONSE {
-				w.noteIgnored(asErr.ResultCode, rec.Key, batchErr, ignoredMessages(op))
-				continue
-			}
 			if err := w.handleRecord(rec, op); err != nil {
 				for _, idx := range op.indexes {
 					failures[idx] = err

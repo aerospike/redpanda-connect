@@ -331,19 +331,28 @@ func TestWriteBatchCommandLevelDoesNotCountWrittenRecords(t *testing.T) {
 	assert.Equal(t, int64(1), w.ignoredTotal.Load())
 }
 
-func TestWriteBatchCommandLevelCountsUnsetResultsOnce(t *testing.T) {
+func TestWriteBatchInDoubtNoResponseIsNotIgnored(t *testing.T) {
 	w := newTestWriter(t, baseConfig+"ignore_error_codes: [22]\n")
 	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
 		require.Len(t, recs, 2)
+		// One node rejected with a listed code. Another node never answered, so
+		// that write stays at NO_RESPONSE and in doubt. The command error is
+		// only the first node's code.
+		recs[0].BatchRec().ResultCode = types.FAIL_FORBIDDEN
+		recs[1].BatchRec().ResultCode = types.NO_RESPONSE
+		recs[1].BatchRec().InDoubt = true
 		return &as.AerospikeError{ResultCode: types.FAIL_FORBIDDEN}
 	}
 
-	err := w.WriteBatch(t.Context(), service.MessageBatch{
-		service.NewMessage([]byte(`{"id":"a","v":1}`)),
-		service.NewMessage([]byte(`{"id":"b","v":1}`)),
-	})
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), w.ignoredTotal.Load())
+	batch := service.MessageBatch{
+		service.NewMessage([]byte(`{"id":"listed","v":1}`)),
+		service.NewMessage([]byte(`{"id":"unanswered","v":1}`)),
+	}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	assert.Equal(t, int64(1), w.ignoredTotal.Load())
+	assert.Contains(t, indexedMessageError(t, indexer, err), "no result")
 }
 
 func TestWriteBatchInDoubtIsNotIgnored(t *testing.T) {
