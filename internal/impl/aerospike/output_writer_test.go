@@ -237,6 +237,64 @@ func TestWriteBatchLongMapKeyIsNotCode21(t *testing.T) {
 	assert.Equal(t, 1, sent)
 }
 
+func TestWriteBatchIgnoresInvalidNamespace(t *testing.T) {
+	w := newTestWriter(t, baseConfig+"ignore_error_codes: [20]\n")
+	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
+		require.Len(t, recs, 2)
+		recs[0].BatchRec().ResultCode = types.INVALID_NAMESPACE
+		recs[1].BatchRec().ResultCode = types.OK
+		return nil
+	}
+
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		service.NewMessage([]byte(`{"id":"bad","v":1}`)),
+		service.NewMessage([]byte(`{"id":"ok","v":1}`)),
+	})
+	require.NoError(t, err)
+}
+
+func TestWriteBatchInvalidNamespaceStillFailsWhenNotListed(t *testing.T) {
+	w := newTestWriter(t, baseConfig)
+	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
+		recs[0].BatchRec().ResultCode = types.INVALID_NAMESPACE
+		recs[1].BatchRec().ResultCode = types.OK
+		return nil
+	}
+
+	batch := service.MessageBatch{
+		service.NewMessage([]byte(`{"id":"bad","v":1}`)),
+		service.NewMessage([]byte(`{"id":"ok","v":1}`)),
+	}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	var berr *service.BatchError
+	require.ErrorAs(t, err, &berr)
+	require.Equal(t, 1, berr.IndexedErrors())
+	assert.Contains(t, indexedMessageError(t, indexer, err), "does not exist")
+}
+
+func TestWriteBatchMissingNamespaceStillFailsWhen20Listed(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: '${! json("namespace_name") }'
+set: users
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+ignore_error_codes: [20]
+`)
+	w.operate = func(*as.BatchPolicy, []as.BatchRecordIfc) error {
+		t.Fatal("a missing namespace field must not be sent")
+		return nil
+	}
+
+	batch := service.MessageBatch{service.NewMessage([]byte(`{"id":"u1","v":1}`))}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	assert.Contains(t, indexedMessageError(t, indexer, err), `"null"`)
+}
+
 func TestWriteBatchIgnoresCommandLevelForbidden(t *testing.T) {
 	w := newTestWriter(t, baseConfig+"ignore_error_codes: [22]\n")
 	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {

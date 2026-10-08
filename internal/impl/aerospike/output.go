@@ -193,7 +193,9 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 		service.NewIntListField(fieldIgnoreErrorCodes).
 			Description(`Aerospike result codes to acknowledge instead of failing the message. Empty by default, so a rejection is still a failure and Connect retries it.
 
-A listed code is logged at warning, counted in `+"`aerospike_ignored_errors`"+`, and then acknowledged. That drops the message: the record is not written, the payload is not kept, and `+"`output.fallback`"+` does not see it, because this output reported success. Use this for a permanent reject such as `+"`13`"+` (`+"`RECORD_TOO_BIG`"+`), `+"`21`"+` (`+"`BIN_NAME_TOO_LONG`"+`), or `+"`22`"+` (`+"`FAIL_FORBIDDEN`"+`), which would otherwise retry forever and hold the source partition.
+A listed code is logged at warning, counted in `+"`aerospike_ignored_errors`"+`, and then acknowledged. That drops the message: the record is not written, the payload is not kept, and `+"`output.fallback`"+` does not see it, because this output reported success. Use this for a permanent reject such as `+"`13`"+` (`+"`RECORD_TOO_BIG`"+`), `+"`20`"+` (`+"`INVALID_NAMESPACE`"+`), `+"`21`"+` (`+"`BIN_NAME_TOO_LONG`"+`), or `+"`22`"+` (`+"`FAIL_FORBIDDEN`"+`), which would otherwise retry forever and hold the source partition.
+
+Code `+"`20`"+` is returned when the resolved namespace is not declared on the cluster. The client marks that record and still writes the other records in the batch. Namespaces cannot be created at runtime. A resolved value of `+"`null`"+` (a missing interpolated field) is rejected while the batch is planned and is not code 20.
 
 Code `+"`21`"+` also covers a top-level bin name longer than 15 bytes. That name is rejected while the batch is planned, so the record is never sent and the server does not return 21. A key inside a map or list is not a bin name and is not code 21.
 
@@ -201,7 +203,7 @@ Code `+"`22`"+` is returned when a positive TTL is written to a namespace with `
 
 A connection failure of the batch is still a failure. So is any mapping error other than that 15-byte name, and any result code left off this list. `+"`max_record_bytes`"+` is a separate local limit and is not code 13.`).
 			Default([]int{}).
-			Example([]int{13, 21, 22}).
+			Example([]int{13, 20, 21, 22}).
 			Advanced(),
 	)
 	spec = spec.Fields(batchPolicyFieldsWithRetries(0)...)

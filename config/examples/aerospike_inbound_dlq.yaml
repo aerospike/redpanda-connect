@@ -1,10 +1,13 @@
 # Write two topics to two namespaces, with a different failure path for each.
 #
 # users -> namespace n1
-#   ignore_error_codes lists 13, 21, and 22. A listed code is acknowledged
+#   ignore_error_codes lists 13, 20, 21, and 22. A listed code is acknowledged
 #   inside the Aerospike output, so the record is not written and fallback
 #   never sees it.
 #   13 RECORD_TOO_BIG is a server rejection.
+#   20 INVALID_NAMESPACE is a namespace that is not declared on the cluster.
+#   The other records in the batch are still written. A missing field that
+#   resolves to "null" is not code 20.
 #   21 BIN_NAME_TOO_LONG also covers a top-level name longer than 15 bytes,
 #   which is rejected here and never sent.
 #   22 FAIL_FORBIDDEN is a positive ttl written to a namespace with
@@ -54,7 +57,7 @@ output:
                 operation: replace
                 ttl: '${! json("ttl").or("keep") }'
                 tombstone_as_delete: true
-                ignore_error_codes: [13, 21, 22]
+                ignore_error_codes: [13, 20, 21, 22]
                 batching:
                   count: 10
                   period: 200ms
