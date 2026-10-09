@@ -874,6 +874,62 @@ func TestIntegrationPartialFailure(t *testing.T) {
 	assert.NotNil(t, outputRead(t, client, "p3"))
 }
 
+// Listing 21 acknowledges the local 15-byte rejection. The long-name record is
+// still not stored, and the other records in the batch are.
+func TestIntegrationIgnoreLongBinName(t *testing.T) {
+	w, client := outputSetup(t, "ignore_error_codes: [21]\n")
+
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"p1","ok":1}`),
+		msg(t, `{"id":"p2","this_bin_name_is_much_too_long":1}`),
+		msg(t, `{"id":"p3","ok":1}`),
+	})
+	require.NoError(t, err)
+
+	assert.NotNil(t, outputRead(t, client, "p1"))
+	assert.Nil(t, outputRead(t, client, "p2"))
+	assert.NotNil(t, outputRead(t, client, "p3"))
+}
+
+// Listing 20 acknowledges a namespace the cluster does not have. The client
+// marks that record and still writes the rest of the batch.
+func TestIntegrationIgnoreInvalidNamespace(t *testing.T) {
+	w, client := outputSetup(t, `
+namespace: '${! json("namespace_name") }'
+ignore_error_codes: [20]
+`)
+
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"ns20-bad","namespace_name":"not_a_namespace","v":1}`),
+		msg(t, `{"id":"ns20-ok","namespace_name":"`+integrationNamespace+`","v":1}`),
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, outputRead(t, client, "ns20-ok"))
+	assert.Nil(t, outputRead(t, client, "ns20-bad"))
+}
+
+// An unlisted 20 fails only that message. The record aimed at a real namespace
+// in the same batch is stored.
+func TestIntegrationInvalidNamespaceStillFailsWhenNotListed(t *testing.T) {
+	w, client := outputSetup(t, `
+namespace: '${! json("namespace_name") }'
+`)
+
+	batch := service.MessageBatch{
+		msg(t, `{"id":"ns20b-bad","namespace_name":"not_a_namespace","v":1}`),
+		msg(t, `{"id":"ns20b-ok","namespace_name":"`+integrationNamespace+`","v":1}`),
+	}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	var batchErr *service.BatchError
+	require.ErrorAs(t, err, &batchErr)
+	assert.Equal(t, 1, batchErr.IndexedErrors())
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "does not exist")
+	assert.NotNil(t, outputRead(t, client, "ns20b-ok"))
+	assert.Nil(t, outputRead(t, client, "ns20b-bad"))
+}
+
 // firstIndexedError returns the per-message error a batch failure carried, so a
 // test can assert on why a message was nacked rather than only that it was.
 func firstIndexedError(t *testing.T, indexer *service.Indexer, err error) error {
