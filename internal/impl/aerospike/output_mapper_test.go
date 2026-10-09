@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
+	"github.com/aerospike/aerospike-client-go/v8/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -539,6 +540,14 @@ func TestParseConfigSkillDefaults(t *testing.T) {
 	assert.Equal(t, as.COMMIT_ALL, w.conf.writePolicy.CommitLevel)
 	assert.Equal(t, as.COMMIT_ALL, w.conf.deletePolicy.CommitLevel)
 	assert.Equal(t, 0, w.conf.maxRecordBytes)
+	assert.Empty(t, w.conf.ignoreCodes)
+}
+
+func TestParseIgnoreErrorCodes(t *testing.T) {
+	w := newTestWriter(t, baseConfig+"ignore_error_codes: [13, 21]\n")
+	assert.True(t, w.conf.ignores(13))
+	assert.True(t, w.conf.ignores(21))
+	assert.False(t, w.conf.ignores(types.KEY_BUSY))
 }
 
 func TestParseCommitLevelMaster(t *testing.T) {
