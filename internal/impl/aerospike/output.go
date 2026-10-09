@@ -92,8 +92,8 @@ counter, or patch a map in place — those need a modeled operate in application
 Treat ` + "`bins`" + ` as a schema contract the server will not enforce: keep bin names and types
 stable, and cap nested lists and maps in Bloblang (` + "`this.events.slice(0, 100)`" + `). Aerospike
 rewrites the entire record on every update, so the bulk of records should stay in
-single-digit KiB. Sets are a name, not a shard key — do not interpolate an unbounded
-value such as a Kafka topic. Primary-key access is the only read this component offers;
+single-digit KiB. Sets are a name, not a shard key. Do not interpolate an unbounded
+value. A small fixed list of topic names is fine. Primary-key access is the only read this component offers;
 do not treat lookup as a join.
 
 ### Batching and hot keys
@@ -120,6 +120,12 @@ retry. Full-record writes are naturally idempotent. If your mapping is not — o
 redelivery of stale data to be rejected outright — enable ` + "`fencing`" + `, which stores a
 monotonic value alongside the record and guards each write with a filter expression
 evaluated on the server.
+
+A resolved namespace that is not declared on the cluster is rejected with code 20
+(` + "`INVALID_NAMESPACE`" + `) for that message only. The other messages in the batch are still
+written. The rejection does not go away on retry, so with ` + "`auto_replay_nacks`" + ` left on,
+that message is replayed forever and holds the source partition. Wrap this output in
+` + "`output.fallback`" + ` so the rejected message is sent somewhere else instead of being retried.
 
 ### What this output does not do
 
@@ -305,6 +311,47 @@ output:
       enabled: true
       bin: _off
       value: '${! meta("kafka_offset") }'
+`,
+		).
+		Example(
+			"Route topics to namespaces and sets",
+			"One cluster, many namespace and set combinations. The topic name can be the namespace, or a switch can send each topic to a fixed namespace and set. A JSON field can choose the namespace. The set is limited to a known list. The test and payments namespaces must already be declared on the server. Each branch is wrapped in output.fallback so a code 20 (INVALID_NAMESPACE) rejection is not replayed forever.",
+			`
+input:
+  redpanda:
+    seed_brokers: [ "localhost:19092" ]
+    topics: [ "test", "payments", "events" ]
+    consumer_group: "aerospike-sink"
+
+output:
+  switch:
+    cases:
+      - check: meta("kafka_topic") == "events"
+        output:
+          fallback:
+            - aerospike:
+                hosts: [ "localhost:3000" ]
+                namespace: '${! json("namespace_name") }'
+                set: '${! if ["clicks", "views"].contains(json("set_name")) { json("set_name") } else { throw("set_name is not allowed") } }'
+                key: '${! json("id") }'
+                bins: 'root = this.without("id", "namespace_name", "set_name")'
+                operation: replace
+            - redpanda:
+                seed_brokers: [ "localhost:19092" ]
+                topic: aerospike-rejects
+      - check: meta("kafka_topic") == "test" || meta("kafka_topic") == "payments"
+        output:
+          fallback:
+            - aerospike:
+                hosts: [ "localhost:3000" ]
+                namespace: '${! meta("kafka_topic") }'
+                set: users
+                key: '${! meta("kafka_key") }'
+                bins: 'root = this'
+                operation: replace
+            - redpanda:
+                seed_brokers: [ "localhost:19092" ]
+                topic: aerospike-rejects
 `,
 		)
 }

@@ -145,8 +145,8 @@ counter, or patch a map in place — those need a modeled operate in application
 Treat `bins` as a schema contract the server will not enforce: keep bin names and types
 stable, and cap nested lists and maps in Bloblang (`this.events.slice(0, 100)`). Aerospike
 rewrites the entire record on every update, so the bulk of records should stay in
-single-digit KiB. Sets are a name, not a shard key — do not interpolate an unbounded
-value such as a Kafka topic. Primary-key access is the only read this component offers;
+single-digit KiB. Sets are a name, not a shard key. Do not interpolate an unbounded
+value. A small fixed list of topic names is fine. Primary-key access is the only read this component offers;
 do not treat lookup as a join.
 
 ### Batching and hot keys
@@ -173,6 +173,12 @@ retry. Full-record writes are naturally idempotent. If your mapping is not — o
 redelivery of stale data to be rejected outright — enable `fencing`, which stores a
 monotonic value alongside the record and guards each write with a filter expression
 evaluated on the server.
+
+A resolved namespace that is not declared on the cluster is rejected with code 20
+(`INVALID_NAMESPACE`) for that message only. The other messages in the batch are still
+written. The rejection does not go away on retry, so with `auto_replay_nacks` left on,
+that message is replayed forever and holds the source partition. Wrap this output in
+`output.fallback` so the rejected message is sent somewhere else instead of being retried.
 
 ### What this output does not do
 
@@ -238,6 +244,51 @@ output:
       enabled: true
       bin: _off
       value: '${! meta("kafka_offset") }'
+```
+
+--
+Route topics to namespaces and sets::
++
+--
+
+One cluster, many namespace and set combinations. The topic name can be the namespace, or a switch can send each topic to a fixed namespace and set. A JSON field can choose the namespace. The set is limited to a known list. The test and payments namespaces must already be declared on the server. Each branch is wrapped in output.fallback so a code 20 (INVALID_NAMESPACE) rejection is not replayed forever.
+
+```yaml
+input:
+  redpanda:
+    seed_brokers: [ "localhost:19092" ]
+    topics: [ "test", "payments", "events" ]
+    consumer_group: "aerospike-sink"
+
+output:
+  switch:
+    cases:
+      - check: meta("kafka_topic") == "events"
+        output:
+          fallback:
+            - aerospike:
+                hosts: [ "localhost:3000" ]
+                namespace: '${! json("namespace_name") }'
+                set: '${! if ["clicks", "views"].contains(json("set_name")) { json("set_name") } else { throw("set_name is not allowed") } }'
+                key: '${! json("id") }'
+                bins: 'root = this.without("id", "namespace_name", "set_name")'
+                operation: replace
+            - redpanda:
+                seed_brokers: [ "localhost:19092" ]
+                topic: aerospike-rejects
+      - check: meta("kafka_topic") == "test" || meta("kafka_topic") == "payments"
+        output:
+          fallback:
+            - aerospike:
+                hosts: [ "localhost:3000" ]
+                namespace: '${! meta("kafka_topic") }'
+                set: users
+                key: '${! meta("kafka_key") }'
+                bins: 'root = this'
+                operation: replace
+            - redpanda:
+                seed_brokers: [ "localhost:19092" ]
+                topic: aerospike-rejects
 ```
 
 --
@@ -553,7 +604,7 @@ password: ${KEY_PASSWORD}
 
 === `namespace`
 
-The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime. A resolved value of `null` is rejected, because a missing interpolated field stringifies to that.
+The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime. A resolved value of `null` is rejected, because a missing interpolated field stringifies to that. Use `meta("kafka_topic")` when the topic name is the namespace.
 This field supports xref:configuration:interpolation.adoc#bloblang-queries[interpolation functions].
 
 
@@ -565,12 +616,16 @@ This field supports xref:configuration:interpolation.adoc#bloblang-queries[inter
 
 namespace: test
 
+namespace: ${! meta("kafka_topic") }
+
+namespace: ${! json("namespace_name") }
+
 namespace: ${! meta("as_namespace") }
 ```
 
 === `set`
 
-The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value such as a Kafka topic name. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.
+The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value. A small fixed list, such as the topics this pipeline consumes, is fine. A payload field is only safe when the mapping throws for anything outside that list, so a bad value fails before a write can create a set. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.
 This field supports xref:configuration:interpolation.adoc#bloblang-queries[interpolation functions].
 
 
@@ -582,6 +637,10 @@ This field supports xref:configuration:interpolation.adoc#bloblang-queries[inter
 # Examples
 
 set: users
+
+set: ${! meta("kafka_topic") }
+
+set: ${! if ["clicks", "views"].contains(json("set_name")) { json("set_name") } else { throw("set_name is not allowed") } }
 
 set: ${! meta("as_set") }
 ```
