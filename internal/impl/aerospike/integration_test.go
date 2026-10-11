@@ -310,6 +310,111 @@ func TestIntegrationWriteAndRead(t *testing.T) {
 	assert.Len(t, rec.Bins, 4)
 }
 
+// TestIntegrationTopicRoutesToSet writes one batch to two sets under one user
+// key. The set name is the Kafka topic, which is how a fixed topic list shares
+// one namespace. The coalescing key includes the set, so the two messages stay
+// two records.
+func TestIntegrationTopicRoutesToSet(t *testing.T) {
+	w, client := outputSetup(t, `
+set: '${! meta("kafka_topic") }'
+`)
+	for _, set := range []string{"route_users", "route_orders"} {
+		require.NoError(t, client.Truncate(nil, integrationNamespace, set, nil))
+	}
+
+	const id = "u-42"
+	users := msg(t, `{"id":"`+id+`","email":"a@b.com"}`)
+	users.MetaSet("kafka_topic", "route_users")
+	orders := msg(t, `{"id":"`+id+`","sku":"book"}`)
+	orders.MetaSet("kafka_topic", "route_orders")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{users, orders}))
+
+	read := func(set string) *as.Record {
+		t.Helper()
+		key, err := as.NewKey(integrationNamespace, set, id)
+		require.NoError(t, err)
+		rec, asErr := client.Get(nil, key)
+		require.NoError(t, asErr)
+		return rec
+	}
+
+	usersRec := read("route_users")
+	ordersRec := read("route_orders")
+	assert.Equal(t, "a@b.com", usersRec.Bins["email"])
+	assert.NotContains(t, usersRec.Bins, "sku")
+	assert.Equal(t, "book", ordersRec.Bins["sku"])
+	assert.NotContains(t, ordersRec.Bins, "email")
+	assert.Nil(t, outputRead(t, client, id), "the default set must not receive a routed write")
+}
+
+// TestIntegrationJSONFieldRoutesNamespaceAndSet writes one batch to two
+// declared namespaces. The same id and set stay two records because the
+// coalescing key includes the namespace.
+func TestIntegrationJSONFieldRoutesNamespaceAndSet(t *testing.T) {
+	w, client := outputSetup(t, `
+namespace: '${! json("namespace_name") }'
+set: '${! json("set_name") }'
+bins: 'root = this.without("id", "namespace_name", "set_name")'
+`)
+	const set = "route_clicks"
+	const id = "e-1"
+	for _, namespace := range []string{integrationNamespace, noNSUPNamespace} {
+		require.NoError(t, client.Truncate(nil, namespace, set, nil))
+	}
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"`+id+`","namespace_name":"`+integrationNamespace+`","set_name":"`+set+`","n":1}`),
+		msg(t, `{"id":"`+id+`","namespace_name":"`+noNSUPNamespace+`","set_name":"`+set+`","n":2}`),
+	}))
+
+	read := func(namespace string) *as.Record {
+		t.Helper()
+		key, err := as.NewKey(namespace, set, id)
+		require.NoError(t, err)
+		rec, asErr := client.Get(nil, key)
+		require.NoError(t, asErr)
+		return rec
+	}
+
+	testRec := read(integrationNamespace)
+	nosupRec := read(noNSUPNamespace)
+	assert.Equal(t, 1, testRec.Bins["n"])
+	assert.Equal(t, 2, nosupRec.Bins["n"])
+	assert.NotContains(t, testRec.Bins, "namespace_name")
+	assert.NotContains(t, testRec.Bins, "set_name")
+	assert.NotContains(t, nosupRec.Bins, "namespace_name")
+	assert.NotContains(t, nosupRec.Bins, "set_name")
+	assert.Nil(t, outputRead(t, client, id), "the default set must not receive a routed write")
+}
+
+// TestIntegrationInvalidNamespaceFailsOneMessage writes one batch at a declared
+// namespace and a name that is not declared. Code 20 fails only the bad
+// message. The good record is stored. With auto_replay_nacks on, the failed
+// message is replayed forever, which is why the routing example wraps that
+// branch in output.fallback.
+func TestIntegrationInvalidNamespaceFailsOneMessage(t *testing.T) {
+	w, client := outputSetup(t, `
+namespace: '${! json("namespace_name") }'
+`)
+
+	batch := service.MessageBatch{
+		msg(t, `{"id":"ns20-bad","namespace_name":"not_a_namespace","v":1}`),
+		msg(t, `{"id":"ns20-ok","namespace_name":"`+integrationNamespace+`","v":1}`),
+	}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+
+	var batchErr *service.BatchError
+	require.ErrorAs(t, err, &batchErr)
+	assert.Equal(t, 1, batchErr.IndexedErrors())
+	msgErr := firstIndexedError(t, indexer, err)
+	assert.Contains(t, msgErr.Error(), "does not exist")
+	assert.Contains(t, msgErr.Error(), "code 20")
+	assert.NotNil(t, outputRead(t, client, "ns20-ok"))
+	assert.Nil(t, outputRead(t, client, "ns20-bad"))
+}
+
 // TestIntegrationCoalescing proves the merge rules against a real server: three
 // messages for one key inside one batch produce one record with the merged bins
 // and the last writer winning, rather than three contending commands.
