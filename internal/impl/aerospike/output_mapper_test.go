@@ -15,6 +15,8 @@
 package aerospike
 
 import (
+	"bytes"
+	"encoding/base64"
 	"testing"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
@@ -561,4 +563,266 @@ func TestMapMessageRejectsOversizeRecord(t *testing.T) {
 	_, err := mapOne(t, w, service.NewMessage([]byte(`{"id":"u1","blob":"abcdefghijklmnopqrstuvwxyz0123456789"}`)))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "max_record_bytes")
+}
+
+func assertDigestKey(t *testing.T, key *as.Key, want []byte) {
+	t.Helper()
+	require.NotNil(t, key.Value())
+	assert.Nil(t, key.Value().GetObject())
+	assert.Equal(t, want, key.Digest())
+}
+
+func TestDigestBase64JSONField(t *testing.T) {
+	raw := bytes.Repeat([]byte{0x11}, digestLen)
+	b64 := base64.StdEncoding.EncodeToString(raw)
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+digest: '${! json("digest") }'
+bins: 'root = this.without("digest")'
+`)
+
+	body := `{"digest":"` + b64 + `","name":"Ada"}`
+	op, err := mapOne(t, w, service.NewMessage([]byte(body)))
+	require.NoError(t, err)
+	assertDigestKey(t, op.key, raw)
+	assert.Equal(t, "Ada", op.bins["name"])
+	assert.NotContains(t, op.bins, "digest")
+
+	hashed, err := as.NewKey("test", "users", b64)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashed.Digest(), op.key.Digest())
+
+	other := service.NewMessage([]byte(`{"digest":"` + b64 + `","name":"Grace"}`))
+	batch := service.MessageBatch{service.NewMessage([]byte(body)), other}
+	resolver := w.conf.keys.resolver(batch)
+	first, err := resolver.resolve(0)
+	require.NoError(t, err)
+	second, err := resolver.resolve(1)
+	require.NoError(t, err)
+	assert.Equal(t, keyID(first), keyID(second))
+}
+
+func TestDigestKafkaKeyBytes(t *testing.T) {
+	raw := make([]byte, digestLen)
+	for i := range raw {
+		raw[i] = byte(i + 1)
+	}
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+digest: '${! meta("kafka_key") }'
+bins: 'root.name = "Ada"'
+`)
+
+	msg := service.NewMessage([]byte(`{}`))
+	msg.MetaSetMut("kafka_key", raw)
+	op, err := mapOne(t, w, msg)
+	require.NoError(t, err)
+	assertDigestKey(t, op.key, raw)
+	assert.Equal(t, opWrite, op.kind)
+}
+
+func TestDigestMetadataBytes(t *testing.T) {
+	raw := bytes.Repeat([]byte{0xab}, digestLen)
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+digest: '${! metadata("kafka_key") }'
+bins: 'root.name = "Ada"'
+`)
+
+	msg := service.NewMessage(nil)
+	msg.MetaSetMut("kafka_key", append([]byte(nil), raw...))
+	op, err := mapOne(t, w, msg)
+	require.NoError(t, err)
+	assertDigestKey(t, op.key, raw)
+}
+
+func TestDigestContentString(t *testing.T) {
+	raw := bytes.Repeat([]byte{0x22}, digestLen)
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+digest: '${! content().string() }'
+bins: 'root.name = "Ada"'
+`)
+
+	op, err := mapOne(t, w, service.NewMessage([]byte(base64.StdEncoding.EncodeToString(raw))))
+	require.NoError(t, err)
+	assertDigestKey(t, op.key, raw)
+}
+
+func TestDigestContentBytesOfBase64AreNotDecoded(t *testing.T) {
+	raw := bytes.Repeat([]byte{0x22}, digestLen)
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+digest: '${! content() }'
+bins: 'root.name = "Ada"'
+`)
+
+	_, err := mapOne(t, w, service.NewMessage([]byte(base64.StdEncoding.EncodeToString(raw))))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "20")
+}
+
+func TestDigestTombstoneUsesKafkaKey(t *testing.T) {
+	raw := bytes.Repeat([]byte{0x7f}, digestLen)
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+digest: '${! meta("kafka_key") }'
+bins: 'root = this'
+tombstone_as_delete: true
+`)
+
+	msg := service.NewMessage(nil)
+	msg.MetaSetMut("kafka_key", raw)
+	op, err := mapOne(t, w, msg)
+	require.NoError(t, err)
+	assert.Equal(t, opDelete, op.kind)
+	assertDigestKey(t, op.key, raw)
+}
+
+func TestDigestRejectsWrongTypesAndLengths(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+digest: '${! json("digest") }'
+bins: 'root = this.without("digest")'
+`)
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "number", body: `{"digest":1}`, want: "int64"},
+		{name: "missing", body: `{"name":"Ada"}`, want: "null"},
+		{name: "short string", body: `{"digest":"!!!!"}`, want: "4 byte"},
+		{name: "wrong decoded length", body: `{"digest":"YWI="}`, want: "decoded to 2 bytes"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := mapOne(t, w, service.NewMessage([]byte(tc.body)))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestDigestRejectsShortByteArray(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+digest: '${! metadata("kafka_key") }'
+bins: 'root.name = "Ada"'
+`)
+
+	msg := service.NewMessage(nil)
+	msg.MetaSetMut("kafka_key", []byte{1, 2, 3, 4})
+	_, err := mapOne(t, w, msg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "4 bytes")
+}
+
+func TestDigestStaticValue(t *testing.T) {
+	raw := bytes.Repeat([]byte{0x33}, digestLen)
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+digest: '`+base64.StdEncoding.EncodeToString(raw)+`'
+bins: 'root.name = "Ada"'
+`)
+
+	op, err := mapOne(t, w, service.NewMessage([]byte(`{}`)))
+	require.NoError(t, err)
+	assertDigestKey(t, op.key, raw)
+}
+
+func TestDigestConfigErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "both",
+			yaml: `
+hosts: [ "localhost:3000" ]
+namespace: test
+key: id
+digest: '${! json("digest") }'
+`,
+			want: "exactly one",
+		},
+		{
+			name: "neither",
+			yaml: `
+hosts: [ "localhost:3000" ]
+namespace: test
+`,
+			want: "exactly one",
+		},
+		{
+			name: "key type",
+			yaml: `
+hosts: [ "localhost:3000" ]
+namespace: test
+digest: '${! json("digest") }'
+key_type: bytes
+`,
+			want: "key_type",
+		},
+		{
+			name: "key encoding",
+			yaml: `
+hosts: [ "localhost:3000" ]
+namespace: test
+digest: '${! json("digest") }'
+key_encoding: hex
+`,
+			want: "key_encoding",
+		},
+		{
+			name: "static length",
+			yaml: `
+hosts: [ "localhost:3000" ]
+namespace: test
+digest: '!!!!'
+`,
+			want: "4 byte",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conf, err := outputSpec().ParseYAML(tc.yaml, nil)
+			require.NoError(t, err)
+			_, err = parseOutputConfig(conf)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestLookupRequiresUserKey(t *testing.T) {
+	// digest is an output field. Lookup still requires a user key, and a digest
+	// value does not satisfy that requirement.
+	_, err := lookupSpec().ParseYAML(`
+hosts: [ "localhost:3000" ]
+namespace: test
+digest: '${! json("digest") }'
+`, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "key")
 }

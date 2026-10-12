@@ -17,6 +17,7 @@ package aerospike
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -308,6 +309,49 @@ func TestIntegrationWriteAndRead(t *testing.T) {
 	// The key field addresses the record and must not be stored again as a bin.
 	assert.NotContains(t, rec.Bins, "id")
 	assert.Len(t, rec.Bins, 4)
+}
+
+// TestIntegrationWriteByDigest writes a record whose address is a producer-supplied
+// digest and whose user key is null. Reading it back with that digest finds the
+// bins; addressing the Base64 text as a user key does not, because that would
+// hash the text instead of using the digest.
+func TestIntegrationWriteByDigest(t *testing.T) {
+	hosts := integrationHost(t)
+	raw := bytes.Repeat([]byte{0x11}, digestLen)
+	b64 := base64.StdEncoding.EncodeToString(raw)
+
+	w := newTestWriter(t, `
+hosts: [ "`+hosts+`" ]
+namespace: `+integrationNamespace+`
+set: `+integrationOutputSet+`
+digest: '${! json("digest") }'
+bins: 'root = this.without("digest")'
+`)
+	require.NoError(t, w.Connect(t.Context()))
+	t.Cleanup(func() { _ = w.Close(context.Background()) })
+
+	client, err := as.NewClientWithPolicyAndHost(w.conf.client.Policy, w.conf.client.Hosts...)
+	require.NoError(t, err)
+	t.Cleanup(client.Close)
+	require.NoError(t, client.Truncate(nil, integrationNamespace, integrationOutputSet, nil))
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"digest":"`+b64+`","name":"Ada"}`),
+	}))
+
+	key, err := as.NewKeyWithDigest(integrationNamespace, integrationOutputSet, nil, raw)
+	require.NoError(t, err)
+	rec, asErr := client.Get(nil, key)
+	require.NoError(t, asErr)
+	assert.Equal(t, "Ada", rec.Bins["name"])
+	assert.NotContains(t, rec.Bins, "digest")
+	assert.Nil(t, key.Value().GetObject())
+
+	hashed, err := as.NewKey(integrationNamespace, integrationOutputSet, b64)
+	require.NoError(t, err)
+	_, asErr = client.Get(nil, hashed)
+	require.Error(t, asErr)
+	assert.True(t, asErr.Matches(2 /* KEY_NOT_FOUND_ERROR */))
 }
 
 // TestIntegrationTopicRoutesToSet writes one batch to two sets under one user
