@@ -16,6 +16,8 @@ package aerospike
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 	"github.com/aerospike/aerospike-client-go/v8/types"
@@ -50,6 +52,21 @@ const (
 	defaultBatchPeriod = "1s"
 )
 
+// retryableIgnoreLint rejects ignore_error_codes entries that a retry could
+// still write. The same set is enforced in parseOutputConfig.
+func retryableIgnoreLint() string {
+	codes := make([]string, 0, len(retryableResultCodes))
+	for code := range retryableResultCodes {
+		codes = append(codes, strconv.Itoa(int(code)))
+	}
+	// The linter runs this mapping on the list and again on each element.
+	return `root = if this.type() == "number" {
+  if [` + strings.Join(codes, ", ") + `].contains(this) {
+    [ "code %v is retryable or not an error and must not be listed".format(this) ]
+  } else { [] }
+} else { [] }`
+}
+
 func outputSpec() *service.ConfigSpec {
 	spec := service.NewConfigSpec().
 		Beta().
@@ -75,8 +92,8 @@ counter, or patch a map in place — those need a modeled operate in application
 Treat ` + "`bins`" + ` as a schema contract the server will not enforce: keep bin names and types
 stable, and cap nested lists and maps in Bloblang (` + "`this.events.slice(0, 100)`" + `). Aerospike
 rewrites the entire record on every update, so the bulk of records should stay in
-single-digit KiB. Sets are a name, not a shard key — do not interpolate an unbounded
-value such as a Kafka topic. Primary-key access is the only read this component offers;
+single-digit KiB. Sets are a name, not a shard key. Do not interpolate an unbounded
+value. A small fixed list of topic names is fine. Primary-key access is the only read this component offers;
 do not treat lookup as a join.
 
 ### Batching and hot keys
@@ -103,6 +120,12 @@ retry. Full-record writes are naturally idempotent. If your mapping is not — o
 redelivery of stale data to be rejected outright — enable ` + "`fencing`" + `, which stores a
 monotonic value alongside the record and guards each write with a filter expression
 evaluated on the server.
+
+A resolved namespace that is not declared on the cluster is rejected with code 20
+(` + "`INVALID_NAMESPACE`" + `) for that message only. The other messages in the batch are still
+written. The rejection does not go away on retry, so with ` + "`auto_replay_nacks`" + ` left on,
+that message is replayed forever and holds the source partition. Wrap this output in
+` + "`output.fallback`" + ` so the rejected message is sent somewhere else instead of being retried.
 
 ### What this output does not do
 
@@ -193,15 +216,20 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 		service.NewIntListField(fieldIgnoreErrorCodes).
 			Description(`Aerospike result codes to acknowledge instead of failing the message. Empty by default, so a rejection is still a failure and Connect retries it.
 
-A listed code is logged at warning, counted in `+"`aerospike_ignored_errors`"+`, and then acknowledged. That drops the message: the record is not written, the payload is not kept, and `+"`output.fallback`"+` does not see it, because this output reported success. Use this for a permanent reject such as `+"`13`"+` (`+"`RECORD_TOO_BIG`"+`), `+"`21`"+` (`+"`BIN_NAME_TOO_LONG`"+`), or `+"`22`"+` (`+"`FAIL_FORBIDDEN`"+`), which would otherwise retry forever and hold the source partition.
+A listed code is logged at warning, counted in `+"`aerospike_ignored_errors`"+`, and then acknowledged. That drops the message: the record is not written, the payload is not kept, and `+"`output.fallback`"+` does not see it, because this output reported success. Use this for a permanent reject such as `+"`13`"+` (`+"`RECORD_TOO_BIG`"+`), `+"`20`"+` (`+"`INVALID_NAMESPACE`"+`), `+"`21`"+` (`+"`BIN_NAME_TOO_LONG`"+`), or `+"`22`"+` (`+"`FAIL_FORBIDDEN`"+`), which would otherwise retry forever and hold the source partition.
+
+Code `+"`20`"+` is returned when the resolved namespace is not declared on the cluster. The client marks that record and still writes the other records in the batch. Namespaces cannot be created at runtime. A resolved value of `+"`null`"+` (a missing interpolated field) is rejected while the batch is planned and is not code 20. When the namespace comes from the message, prefer `+"`output.fallback`"+` over listing 20: a typo in that field is published instead of dropped.
 
 Code `+"`21`"+` also covers a top-level bin name longer than 15 bytes. That name is rejected while the batch is planned, so the record is never sent and the server does not return 21. A key inside a map or list is not a bin name and is not code 21.
 
 Code `+"`22`"+` is returned when a positive TTL is written to a namespace with `+"`nsup-period 0`"+`. TTL values `+"`0`"+`, `+"`-1`"+` (`+"`never`"+`), and `+"`-2`"+` (`+"`keep`"+`) do not return 22.
 
-A connection failure of the batch is still a failure. So is any mapping error other than that 15-byte name, and any result code left off this list. `+"`max_record_bytes`"+` is a separate local limit and is not code 13.`).
+With `+"`coalesce_batch_keys`"+` left on, several messages for one key become one record. A listed code on that record acknowledges every message that folded into it, including messages that would have fit on their own.
+
+A connection failure of the batch is still a failure. So is any mapping error other than that 15-byte name, a result that is in doubt, and any result code left off this list. `+"`max_record_bytes`"+` is a separate local limit and is not code 13. Codes `+"`0`"+` (`+"`OK`"+`), `+"`9`"+` (`+"`TIMEOUT`"+`), `+"`14`"+` (`+"`KEY_BUSY`"+`), and `+"`18`"+` (`+"`DEVICE_OVERLOAD`"+`) are rejected, as are other retryable and connection codes. Listing one would drop a record a retry could still write.`).
 			Default([]int{}).
-			Example([]int{13, 21, 22}).
+			Example([]int{13, 20, 21, 22}).
+			LintRule(retryableIgnoreLint()).
 			Advanced(),
 	)
 	spec = spec.Fields(batchPolicyFieldsWithRetries(0)...)
@@ -283,6 +311,47 @@ output:
       enabled: true
       bin: _off
       value: '${! meta("kafka_offset") }'
+`,
+		).
+		Example(
+			"Route topics to namespaces and sets",
+			"One cluster, many namespace and set combinations. The topic name can be the namespace, or a switch can send each topic to a fixed namespace and set. A JSON field can choose the namespace. The set is limited to a known list. The test and payments namespaces must already be declared on the server. Each branch is wrapped in output.fallback so a code 20 (INVALID_NAMESPACE) rejection is not replayed forever.",
+			`
+input:
+  redpanda:
+    seed_brokers: [ "localhost:19092" ]
+    topics: [ "test", "payments", "events" ]
+    consumer_group: "aerospike-sink"
+
+output:
+  switch:
+    cases:
+      - check: meta("kafka_topic") == "events"
+        output:
+          fallback:
+            - aerospike:
+                hosts: [ "localhost:3000" ]
+                namespace: '${! json("namespace_name") }'
+                set: '${! if ["clicks", "views"].contains(json("set_name")) { json("set_name") } else { throw("set_name is not allowed") } }'
+                key: '${! json("id") }'
+                bins: 'root = this.without("id", "namespace_name", "set_name")'
+                operation: replace
+            - redpanda:
+                seed_brokers: [ "localhost:19092" ]
+                topic: aerospike-rejects
+      - check: meta("kafka_topic") == "test" || meta("kafka_topic") == "payments"
+        output:
+          fallback:
+            - aerospike:
+                hosts: [ "localhost:3000" ]
+                namespace: '${! meta("kafka_topic") }'
+                set: users
+                key: '${! meta("kafka_key") }'
+                bins: 'root = this'
+                operation: replace
+            - redpanda:
+                seed_brokers: [ "localhost:19092" ]
+                topic: aerospike-rejects
 `,
 		)
 }
@@ -389,6 +458,10 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 	if len(codes) > 0 {
 		c.ignoreCodes = make(map[int]struct{}, len(codes))
 		for _, code := range codes {
+			if retryableIgnore(code) {
+				return nil, fmt.Errorf("field '%v': code %d (%s) is retryable or not an error and must not be listed",
+					fieldIgnoreErrorCodes, code, types.ResultCodeToString(types.ResultCode(code)))
+			}
 			c.ignoreCodes[code] = struct{}{}
 		}
 	}

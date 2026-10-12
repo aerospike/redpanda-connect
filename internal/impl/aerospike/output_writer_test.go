@@ -16,6 +16,7 @@ package aerospike
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
@@ -23,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/redpanda-data/benthos/v4/public/bloblang"
 	"github.com/redpanda-data/benthos/v4/public/service"
 )
 
@@ -135,6 +137,7 @@ func TestWriteBatchMixedIgnoreAndFailure(t *testing.T) {
 	var berr *service.BatchError
 	require.ErrorAs(t, err, &berr)
 	require.Equal(t, 1, berr.IndexedErrors())
+	assert.Equal(t, int64(1), w.ignoredTotal.Load())
 
 	var failed string
 	berr.WalkMessagesIndexedBy(indexer, func(_ int, msg *service.Message, msgErr error) bool {
@@ -237,6 +240,64 @@ func TestWriteBatchLongMapKeyIsNotCode21(t *testing.T) {
 	assert.Equal(t, 1, sent)
 }
 
+func TestWriteBatchIgnoresInvalidNamespace(t *testing.T) {
+	w := newTestWriter(t, baseConfig+"ignore_error_codes: [20]\n")
+	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
+		require.Len(t, recs, 2)
+		recs[0].BatchRec().ResultCode = types.INVALID_NAMESPACE
+		recs[1].BatchRec().ResultCode = types.OK
+		return nil
+	}
+
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		service.NewMessage([]byte(`{"id":"bad","v":1}`)),
+		service.NewMessage([]byte(`{"id":"ok","v":1}`)),
+	})
+	require.NoError(t, err)
+}
+
+func TestWriteBatchInvalidNamespaceStillFailsWhenNotListed(t *testing.T) {
+	w := newTestWriter(t, baseConfig)
+	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
+		recs[0].BatchRec().ResultCode = types.INVALID_NAMESPACE
+		recs[1].BatchRec().ResultCode = types.OK
+		return nil
+	}
+
+	batch := service.MessageBatch{
+		service.NewMessage([]byte(`{"id":"bad","v":1}`)),
+		service.NewMessage([]byte(`{"id":"ok","v":1}`)),
+	}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	var berr *service.BatchError
+	require.ErrorAs(t, err, &berr)
+	require.Equal(t, 1, berr.IndexedErrors())
+	assert.Contains(t, indexedMessageError(t, indexer, err), "does not exist")
+}
+
+func TestWriteBatchMissingNamespaceStillFailsWhen20Listed(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: '${! json("namespace_name") }'
+set: users
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+ignore_error_codes: [20]
+`)
+	w.operate = func(*as.BatchPolicy, []as.BatchRecordIfc) error {
+		t.Fatal("a missing namespace field must not be sent")
+		return nil
+	}
+
+	batch := service.MessageBatch{service.NewMessage([]byte(`{"id":"u1","v":1}`))}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	assert.Contains(t, indexedMessageError(t, indexer, err), `"null"`)
+}
+
 func TestWriteBatchIgnoresCommandLevelForbidden(t *testing.T) {
 	w := newTestWriter(t, baseConfig+"ignore_error_codes: [22]\n")
 	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
@@ -250,6 +311,82 @@ func TestWriteBatchIgnoresCommandLevelForbidden(t *testing.T) {
 		service.NewMessage([]byte(`{"id":"u1","v":1}`)),
 	})
 	require.NoError(t, err)
+	assert.Equal(t, int64(1), w.ignoredTotal.Load())
+}
+
+func TestWriteBatchCommandLevelDoesNotCountWrittenRecords(t *testing.T) {
+	w := newTestWriter(t, baseConfig+"ignore_error_codes: [22]\n")
+	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
+		require.Len(t, recs, 2)
+		recs[0].BatchRec().ResultCode = types.FAIL_FORBIDDEN
+		recs[1].BatchRec().ResultCode = types.OK
+		return &as.AerospikeError{ResultCode: types.FAIL_FORBIDDEN}
+	}
+
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		service.NewMessage([]byte(`{"id":"bad","v":1}`)),
+		service.NewMessage([]byte(`{"id":"ok","v":1}`)),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), w.ignoredTotal.Load())
+}
+
+func TestWriteBatchInDoubtNoResponseIsNotIgnored(t *testing.T) {
+	w := newTestWriter(t, baseConfig+"ignore_error_codes: [22]\n")
+	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
+		require.Len(t, recs, 2)
+		// One node rejected with a listed code. Another node never answered, so
+		// that write stays at NO_RESPONSE and in doubt. The command error is
+		// only the first node's code.
+		recs[0].BatchRec().ResultCode = types.FAIL_FORBIDDEN
+		recs[1].BatchRec().ResultCode = types.NO_RESPONSE
+		recs[1].BatchRec().InDoubt = true
+		return &as.AerospikeError{ResultCode: types.FAIL_FORBIDDEN}
+	}
+
+	batch := service.MessageBatch{
+		service.NewMessage([]byte(`{"id":"listed","v":1}`)),
+		service.NewMessage([]byte(`{"id":"unanswered","v":1}`)),
+	}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	assert.Equal(t, int64(1), w.ignoredTotal.Load())
+	assert.Contains(t, indexedMessageError(t, indexer, err), "no result")
+}
+
+func TestWriteBatchInDoubtIsNotIgnored(t *testing.T) {
+	w := newTestWriter(t, baseConfig+"ignore_error_codes: [13]\n")
+	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
+		rec := recs[0].BatchRec()
+		rec.ResultCode = types.RECORD_TOO_BIG
+		rec.InDoubt = true
+		return nil
+	}
+
+	batch := service.MessageBatch{service.NewMessage([]byte(`{"id":"u1","v":1}`))}
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	assert.Equal(t, int64(0), w.ignoredTotal.Load())
+}
+
+func TestConfigRejectsRetryableIgnoreCode(t *testing.T) {
+	exe, err := bloblang.Parse(retryableIgnoreLint())
+	require.NoError(t, err)
+	bad, err := exe.Query(int64(14))
+	require.NoError(t, err)
+	assert.Contains(t, fmt.Sprint(bad), "must not be listed")
+	ok, err := exe.Query(int64(22))
+	require.NoError(t, err)
+	assert.Empty(t, ok)
+
+	for _, code := range []int{0, 9, 14, 18} {
+		conf, err := outputSpec().ParseYAML(baseConfig+fmt.Sprintf("ignore_error_codes: [%d]\n", code), nil)
+		require.NoError(t, err)
+		_, err = parseOutputConfig(conf)
+		require.Error(t, err, "code %d", code)
+		assert.Contains(t, err.Error(), "must not be listed")
+	}
 }
 
 func TestWriteBatchCommandLevelForbiddenStillFailsWhenNotListed(t *testing.T) {

@@ -54,6 +54,14 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 
+# Auth tests expect user rpcn / rpcnpass. Create it before the roster step so
+# a roster failure does not leave the TLS tests with only the admin user.
+echo "creating user rpcn on as-ee-sec ..."
+docker exec as-ee-sec asadm -U admin -P admin --enable -e \
+  "manage acl create user rpcn password rpcnpass roles read-write sys-admin" || true
+docker exec as-ee-sec asadm -U admin -P admin --enable -e \
+  "manage acl grant user rpcn roles read-write sys-admin" || true
+
 # A non-null roster is not enough. After a container restart the namespace can
 # still name the previous node ids, and strong-consistency writes then fail
 # until the roster is restaged onto the nodes that are actually up.
@@ -63,12 +71,14 @@ node_set() {
 
 # recluster is ignored unless it is sent to the current principal.
 principal_container() {
-  local c stats node principal
+  local c stats node principal node_id principal_id
   for c in as-ee-1 as-ee-2; do
     stats="$(docker exec "$c" asinfo -v statistics 2>/dev/null || true)"
     node="$(docker exec "$c" asinfo -v node 2>/dev/null || true)"
     principal="$(printf '%s\n' "$stats" | tr ';' '\n' | sed -n 's/^cluster_principal=//p')"
-    if [[ -n "$node" && "$node" == "$principal" ]]; then
+    node_id="$(printf '%s' "$node" | tr '[:lower:]' '[:upper:]')"
+    principal_id="$(printf '%s' "$principal" | tr '[:lower:]' '[:upper:]')"
+    if [[ -n "$node_id" && "$node_id" == "$principal_id" ]]; then
       printf '%s' "$c"
       return
     fi
@@ -82,7 +92,7 @@ sc_dead() {
   local c stats
   for c in as-ee-1 as-ee-2; do
     stats="$(docker exec "$c" asinfo -v 'namespace/sc' 2>/dev/null || true)"
-    if ! grep -q 'dead_partitions=0' <<<"$stats"; then
+    if ! grep -q 'dead_partitions=0;' <<<"${stats};"; then
       return 0
     fi
   done
@@ -101,17 +111,14 @@ for _ in $(seq 1 30); do
   roster_set="$(node_set "$roster_nodes")"
   observed_set="$(node_set "$observed")"
   stats="$(docker exec "$principal" asinfo -v 'namespace/sc' 2>/dev/null || true)"
-  if [[ -n "$observed_set" && "$roster_set" == "$observed_set" ]] && grep -q 'ns_cluster_size=2' <<<"$stats" && ! sc_dead; then
-    echo "  $roster"
-    ready=1
-    break
-  fi
-  # One observed node means the cluster is still forming. Do not lock that in.
-  # wc -l counts newlines. The last id has none, so two nodes were counted as one
-  # and revive never ran.
   observed_count=0
   if [[ -n "$observed_set" ]]; then
     observed_count="$(awk -F, '{print NF}' <<<"$observed_set")"
+  fi
+  if [[ "$observed_count" -eq 2 && "$roster_set" == "$observed_set" ]] && grep -q 'ns_cluster_size=2' <<<"$stats" && ! sc_dead; then
+    echo "  $roster"
+    ready=1
+    break
   fi
   if [[ "$observed_count" -eq 2 ]]; then
     echo "  roster (${roster_set:-null}) observed ($observed_set); repairing on $principal"
@@ -131,13 +138,6 @@ if [[ "$ready" -ne 1 ]]; then
   exit 1
 fi
 
-# Auth tests expect user rpcn / rpcnpass. Default docker admin is often admin/admin.
-echo "creating user rpcn on as-ee-sec ..."
-docker exec as-ee-sec asadm -U admin -P admin --enable -e \
-  "manage acl create user rpcn password rpcnpass roles read-write sys-admin" || true
-docker exec as-ee-sec asadm -U admin -P admin --enable -e \
-  "manage acl grant user rpcn roles read-write sys-admin" || true
-
 cat <<EOF
 
 EE env for this checkout:
@@ -146,9 +146,6 @@ EE env for this checkout:
   export AEROSPIKE_SEC_HOST=127.0.0.1:3200
   export AEROSPIKE_TLS_HOST=127.0.0.1:clusterA:4333
   export AEROSPIKE_TLS_CA=$DIR/certs/ca.pem
-  # client.pem (CN rpcn) sits next to that CA.
-  # The TLS port requires a client certificate. Restart as-ee-sec after
-  # this change so tls-authenticate-client any is loaded.
 
   go test -count=1 -timeout 10m -v -run 'TestEE' ./internal/impl/aerospike/
 

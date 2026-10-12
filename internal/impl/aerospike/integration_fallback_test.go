@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,34 +32,19 @@ import (
 	"github.com/redpanda-data/benthos/v4/public/service"
 )
 
-func init() {
-	// The example publishes the rejected record to a Redpanda topic. This
-	// output stands in for that topic so the test can see the message.
-	// The pure import registers fallback, retry, and the none tracer.
-	service.MustRegisterBatchOutput(
-		"aerospike_test_dlq",
-		service.NewConfigSpec(),
-		func(*service.ParsedConfig, *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
-			return dlqOutput{}, service.BatchPolicy{}, 1, nil
-		},
-	)
-}
-
-// dlqSeen collects messages the fallback output forwards after Aerospike
-// rejects them. Tests set it before producing.
-var dlqSeen struct {
+// dlqSink collects messages the fallback output forwards after Aerospike
+// rejects them. It is registered on a private environment, not the global one.
+type dlqSink struct {
 	sync.Mutex
 	msgs []*service.Message
 }
 
-type dlqOutput struct{}
+func (*dlqSink) Connect(context.Context) error { return nil }
+func (*dlqSink) Close(context.Context) error   { return nil }
 
-func (dlqOutput) Connect(context.Context) error { return nil }
-func (dlqOutput) Close(context.Context) error   { return nil }
-
-func (dlqOutput) WriteBatch(_ context.Context, batch service.MessageBatch) error {
-	dlqSeen.Lock()
-	defer dlqSeen.Unlock()
+func (s *dlqSink) WriteBatch(_ context.Context, batch service.MessageBatch) error {
+	s.Lock()
+	defer s.Unlock()
 	for _, m := range batch {
 		body, err := m.AsBytes()
 		if err != nil {
@@ -69,23 +55,37 @@ func (dlqOutput) WriteBatch(_ context.Context, batch service.MessageBatch) error
 			copied.MetaSet(k, v)
 			return nil
 		})
-		dlqSeen.msgs = append(dlqSeen.msgs, copied)
+		s.msgs = append(s.msgs, copied)
 	}
 	return nil
 }
 
-func resetDLQ() {
-	dlqSeen.Lock()
-	dlqSeen.msgs = nil
-	dlqSeen.Unlock()
+func (s *dlqSink) reset() {
+	s.Lock()
+	s.msgs = nil
+	s.Unlock()
 }
 
-func dlqMessages() []*service.Message {
-	dlqSeen.Lock()
-	defer dlqSeen.Unlock()
-	out := make([]*service.Message, len(dlqSeen.msgs))
-	copy(out, dlqSeen.msgs)
+func (s *dlqSink) messages() []*service.Message {
+	s.Lock()
+	defer s.Unlock()
+	out := make([]*service.Message, len(s.msgs))
+	copy(out, s.msgs)
 	return out
+}
+
+func newDLQEnv(t *testing.T, sink *dlqSink) *service.Environment {
+	t.Helper()
+	env := service.NewEnvironment()
+	err := env.RegisterBatchOutput(
+		"aerospike_test_dlq",
+		service.NewConfigSpec(),
+		func(*service.ParsedConfig, *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
+			return sink, service.BatchPolicy{}, 1, nil
+		},
+	)
+	require.NoError(t, err)
+	return env
 }
 
 const noNSUPNamespace = "nosup"
@@ -98,15 +98,17 @@ const noNSUPNamespace = "nosup"
 func TestIntegrationFallbackDLQ(t *testing.T) {
 	host := integrationHost(t)
 	client := fallbackClient(t, host)
+	sink := &dlqSink{}
+	env := newDLQEnv(t, sink)
 
 	t.Run("rejected record is published", func(t *testing.T) {
-		resetDLQ()
-		produce := fallbackProduce(t, host, integrationNamespace, "")
+		sink.reset()
+		produce := fallbackProduce(t, env, host, integrationNamespace, "")
 		require.NoError(t, produce(t.Context(), msg(t, `{"id":"fb-ok","v":1}`)))
 		require.NoError(t, produce(t.Context(), msg(t, `{"id":"fb-long","this_bin_name_is_much_too_long":1}`)))
 		require.NoError(t, produce(t.Context(), msg(t, `{"id":"fb-ok2","v":1}`)))
 
-		got := dlqMessages()
+		got := sink.messages()
 		require.Len(t, got, 1)
 		body, err := got[0].AsBytes()
 		require.NoError(t, err)
@@ -121,13 +123,13 @@ func TestIntegrationFallbackDLQ(t *testing.T) {
 	})
 
 	t.Run("listed code is not published", func(t *testing.T) {
-		resetDLQ()
-		produce := fallbackProduce(t, host, integrationNamespace, "ignore_error_codes: [21]\n")
+		sink.reset()
+		produce := fallbackProduce(t, env, host, integrationNamespace, "ignore_error_codes: [21]")
 		require.NoError(t, produce(t.Context(), msg(t, `{"id":"ig-ok","v":1}`)))
 		require.NoError(t, produce(t.Context(), msg(t, `{"id":"ig-long","this_bin_name_is_much_too_long":1}`)))
 		require.NoError(t, produce(t.Context(), msg(t, `{"id":"ig-ok2","v":1}`)))
 
-		assert.Empty(t, dlqMessages())
+		assert.Empty(t, sink.messages())
 		assert.NotNil(t, readID(t, client, integrationNamespace, "ig-ok"))
 		assert.Nil(t, readID(t, client, integrationNamespace, "ig-long"))
 		assert.NotNil(t, readID(t, client, integrationNamespace, "ig-ok2"))
@@ -136,13 +138,13 @@ func TestIntegrationFallbackDLQ(t *testing.T) {
 	// ignore_error_codes lists 22 only. A positive TTL on nosup is acknowledged
 	// and dropped. A long bin name is code 21, so fallback publishes it.
 	t.Run("ignored code is dropped and other rejects are published", func(t *testing.T) {
-		resetDLQ()
-		produce := fallbackProduce(t, host, noNSUPNamespace, "ignore_error_codes: [22]\n        ttl: '${! json(\"ttl\").or(\"0\") }'\n")
+		sink.reset()
+		produce := fallbackProduce(t, env, host, noNSUPNamespace, "ignore_error_codes: [22]\nttl: '${! json(\"ttl\").or(\"0\") }'")
 		require.NoError(t, produce(t.Context(), msg(t, `{"id":"mix-ok","v":1}`)))
 		require.NoError(t, produce(t.Context(), msg(t, `{"id":"mix-ttl","v":1,"ttl":"30s"}`)))
 		require.NoError(t, produce(t.Context(), msg(t, `{"id":"mix-long","this_bin_name_is_much_too_long":1}`)))
 
-		got := dlqMessages()
+		got := sink.messages()
 		require.Len(t, got, 1)
 		body, err := got[0].AsBytes()
 		require.NoError(t, err)
@@ -158,10 +160,21 @@ func TestIntegrationFallbackDLQ(t *testing.T) {
 	})
 }
 
-func fallbackProduce(t *testing.T, host, namespace, extra string) service.MessageHandlerFunc {
+func fallbackProduce(t *testing.T, env *service.Environment, host, namespace, extra string) service.MessageHandlerFunc {
 	t.Helper()
 
-	builder := service.NewStreamBuilder()
+	var extraYAML strings.Builder
+	for line := range strings.SplitSeq(extra, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		extraYAML.WriteString("        ")
+		extraYAML.WriteString(line)
+		extraYAML.WriteByte('\n')
+	}
+
+	builder := env.NewStreamBuilder()
 	require.NoError(t, builder.SetYAML(`
 http:
   enabled: false
@@ -177,8 +190,7 @@ output:
         bins: 'root = this.without("id", "ttl")'
         batching:
           count: 1
-        `+extra+`
-    - aerospike_test_dlq: {}
+`+extraYAML.String()+`    - aerospike_test_dlq: {}
 `))
 	produce, err := builder.AddProducerFunc()
 	require.NoError(t, err)

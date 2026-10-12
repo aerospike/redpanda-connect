@@ -32,6 +32,29 @@ var connectionCodes = []types.ResultCode{
 	types.INVALID_CREDENTIAL,
 }
 
+// retryableResultCodes are results a later attempt can still write, plus OK,
+// which is not an error. Listing one acknowledges the message and drops it.
+var retryableResultCodes = map[types.ResultCode]struct{}{
+	types.OK:                   {},
+	types.TIMEOUT:              {},
+	types.KEY_BUSY:             {},
+	types.DEVICE_OVERLOAD:      {},
+	types.XDR_KEY_BUSY:         {},
+	types.MAX_RETRIES_EXCEEDED: {},
+	types.NO_RESPONSE:          {},
+	types.BATCH_FAILED:         {},
+	types.NETWORK_ERROR:        {},
+	types.SERVER_NOT_AVAILABLE: {},
+	types.INVALID_NODE_ERROR:   {},
+	types.NOT_AUTHENTICATED:    {},
+	types.INVALID_CREDENTIAL:   {},
+}
+
+func retryableIgnore(code int) bool {
+	_, ok := retryableResultCodes[types.ResultCode(code)]
+	return ok
+}
+
 // isConnectionError reports whether err is a transport or auth failure that
 // should trigger a reconnect rather than a per-message nack.
 func isConnectionError(err error) bool {
