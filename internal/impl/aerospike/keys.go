@@ -95,10 +95,11 @@ func addressFields(withDigest bool, keyExamples ...string) []*service.ConfigFiel
 	if withDigest {
 		fields = append(fields,
 			service.NewInterpolatedStringField(fieldDigest).
-				Description("The 20-byte record digest as standard Base64, as produced by another Aerospike client. The user key stored with the record is null. Set this or `key`, not both. `key_type` and `key_encoding` apply only to `key`.\n\nThis does not hash the value. `key` with `key_type: bytes` hashes those bytes and addresses a different record.").
+				Description("The 20-byte record digest as standard Base64, as produced by another Aerospike client. The user key stored with the record is null. Set this or `key`, not both. `key_type` and `key_encoding` apply only to `key`. `namespace` and `set` must be the ones the digest was computed for.\n\nInterpolation always yields a string, so a raw 20-byte digest cannot be told apart from 20 characters of text and is rejected. Encode it in the mapping instead: `${! content().encode(\"base64\") }` for a raw payload, or `${! meta(\"kafka_key\").encode(\"base64\") }` for a raw Kafka key.\n\nThis does not hash the value. `key` with `key_type: bytes` hashes those bytes and addresses a different record.").
 				Optional().
 				Example(`${! json("digest") }`).
-				Example(`${! meta("as_digest") }`),
+				Example(`${! content().encode("base64") }`).
+				Example(`${! meta("kafka_key").encode("base64") }`),
 		)
 	}
 	return append(fields,

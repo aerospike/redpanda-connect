@@ -51,6 +51,7 @@ const (
 	integrationNamespace   = "test"
 	integrationOutputSet   = "rpa_e2e"
 	integrationLookupSet   = "rpa_lookup"
+	integrationDigestSet   = "rpa_digest"
 	aerospikeContainerPort = "3000/tcp"
 )
 
@@ -312,27 +313,22 @@ func TestIntegrationWriteAndRead(t *testing.T) {
 	assert.Len(t, rec.Bins, 4)
 }
 
-// TestIntegrationWriteByDigest writes a record whose address is a producer-supplied
-// digest. Reading it back with that digest finds the bins; addressing the Base64
-// text as a user key does not, because that would hash the text instead of using
-// the digest. With send_key on, a scan shows the server stored no user key for
-// the digest record, while a record written by key in the same set has one.
-func TestIntegrationWriteByDigest(t *testing.T) {
+// digestTestWriters returns a writer addressing records by digest and one
+// addressing them by user key, both on the digest test set with send_key on.
+func digestTestWriters(t *testing.T) (byDigest, byKey *aerospikeWriter, client *as.Client) {
+	t.Helper()
 	hosts := integrationHost(t)
-	raw := bytes.Repeat([]byte{0x11}, digestLen)
-	b64 := base64.StdEncoding.EncodeToString(raw)
-
 	common := `
 hosts: [ "` + hosts + `" ]
 namespace: ` + integrationNamespace + `
-set: ` + integrationOutputSet + `
+set: ` + integrationDigestSet + `
 send_key: true
 `
-	byDigest := newTestWriter(t, common+`
+	byDigest = newTestWriter(t, common+`
 digest: '${! json("digest") }'
 bins: 'root = this.without("digest")'
 `)
-	byKey := newTestWriter(t, common+`
+	byKey = newTestWriter(t, common+`
 key: '${! json("id") }'
 bins: 'root = this.without("id")'
 `)
@@ -344,7 +340,45 @@ bins: 'root = this.without("id")'
 	client, err := as.NewClientWithPolicyAndHost(byDigest.conf.client.Policy, byDigest.conf.client.Hosts...)
 	require.NoError(t, err)
 	t.Cleanup(client.Close)
-	require.NoError(t, client.Truncate(nil, integrationNamespace, integrationOutputSet, nil))
+	return byDigest, byKey, client
+}
+
+// storedUserKeys scans the digest test set and returns the user key the server
+// stored for each of the given digests, or nil when none is stored. Get cannot
+// show this, because it returns the key it was called with.
+func storedUserKeys(t *testing.T, client *as.Client, digests ...[]byte) map[string]any {
+	t.Helper()
+	want := map[string]bool{}
+	for _, d := range digests {
+		want[string(d)] = true
+	}
+	rs, asErr := client.ScanAll(nil, integrationNamespace, integrationDigestSet)
+	require.NoError(t, asErr)
+	stored := map[string]any{}
+	for res := range rs.Results() {
+		require.NoError(t, res.Err)
+		d := string(res.Record.Key.Digest())
+		if !want[d] {
+			continue
+		}
+		var userKey any
+		if v := res.Record.Key.Value(); v != nil {
+			userKey = v.GetObject()
+		}
+		stored[d] = userKey
+	}
+	return stored
+}
+
+// TestIntegrationWriteByDigest writes a record whose address is a producer-supplied
+// digest. Reading it back with that digest finds the bins; addressing the Base64
+// text as a user key does not, because that would hash the text instead of using
+// the digest. With send_key on, the server stores no user key for the digest
+// record, while a record written by key in the same set has one.
+func TestIntegrationWriteByDigest(t *testing.T) {
+	byDigest, byKey, client := digestTestWriters(t)
+	raw := bytes.Repeat([]byte{0x11}, digestLen)
+	b64 := base64.StdEncoding.EncodeToString(raw)
 
 	require.NoError(t, byDigest.WriteBatch(t.Context(), service.MessageBatch{
 		msg(t, `{"digest":"`+b64+`","name":"Ada"}`),
@@ -353,31 +387,49 @@ bins: 'root = this.without("id")'
 		msg(t, `{"id":"grace","name":"Grace"}`),
 	}))
 
-	key, err := as.NewKeyWithDigest(integrationNamespace, integrationOutputSet, nil, raw)
+	key, err := as.NewKeyWithDigest(integrationNamespace, integrationDigestSet, nil, raw)
 	require.NoError(t, err)
 	rec, asErr := client.Get(nil, key)
 	require.NoError(t, asErr)
 	assert.Equal(t, "Ada", rec.Bins["name"])
 	assert.NotContains(t, rec.Bins, "digest")
 
-	hashed, err := as.NewKey(integrationNamespace, integrationOutputSet, b64)
+	hashed, err := as.NewKey(integrationNamespace, integrationDigestSet, b64)
 	require.NoError(t, err)
 	_, asErr = client.Get(nil, hashed)
 	require.Error(t, asErr)
 	assert.True(t, asErr.Matches(types.KEY_NOT_FOUND_ERROR))
 
-	rs, asErr := client.ScanAll(nil, integrationNamespace, integrationOutputSet)
+	grace, err := as.NewKey(integrationNamespace, integrationDigestSet, "grace")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		string(raw):            nil,
+		string(grace.Digest()): "grace",
+	}, storedUserKeys(t, client, raw, grace.Digest()))
+}
+
+// TestIntegrationUpdateByKeyDigest writes a record by user key, then updates it
+// by that key's digest. The update changes the bins and keeps the user key the
+// first write stored, because a write by digest sends no user key.
+func TestIntegrationUpdateByKeyDigest(t *testing.T) {
+	byDigest, byKey, client := digestTestWriters(t)
+
+	require.NoError(t, byKey.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"ingest-1","name":"Ada","city":"London"}`),
+	}))
+
+	key, err := as.NewKey(integrationNamespace, integrationDigestSet, "ingest-1")
+	require.NoError(t, err)
+	b64 := base64.StdEncoding.EncodeToString(key.Digest())
+	require.NoError(t, byDigest.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"digest":"`+b64+`","name":"Grace"}`),
+	}))
+
+	rec, asErr := client.Get(nil, key)
 	require.NoError(t, asErr)
-	storedKeys := map[string]any{}
-	for res := range rs.Results() {
-		require.NoError(t, res.Err)
-		var userKey any
-		if v := res.Record.Key.Value(); v != nil {
-			userKey = v.GetObject()
-		}
-		storedKeys[res.Record.Bins["name"].(string)] = userKey
-	}
-	assert.Equal(t, map[string]any{"Ada": nil, "Grace": "grace"}, storedKeys)
+	assert.Equal(t, "Grace", rec.Bins["name"])
+	assert.Equal(t, "London", rec.Bins["city"])
+	assert.Equal(t, map[string]any{string(key.Digest()): "ingest-1"}, storedUserKeys(t, client, key.Digest()))
 }
 
 // TestIntegrationTopicRoutesToSet writes one batch to two sets under one user

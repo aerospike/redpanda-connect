@@ -620,6 +620,47 @@ bins: 'root.name = "Ada"'
 	assertDigestKey(t, op.key, raw)
 }
 
+func TestDigestRawBytesEncodedInMapping(t *testing.T) {
+	// Not valid UTF-8, so a lossy string conversion would change the digest.
+	raw := bytes.Repeat([]byte{0xff, 0x00, 0x80, 0xc3}, digestLen/4)
+
+	tests := []struct {
+		name   string
+		digest string
+		msg    func() *service.Message
+	}{
+		{
+			name:   "payload",
+			digest: `${! content().encode("base64") }`,
+			msg:    func() *service.Message { return service.NewMessage(append([]byte(nil), raw...)) },
+		},
+		{
+			name:   "kafka key",
+			digest: `${! meta("kafka_key").encode("base64") }`,
+			msg: func() *service.Message {
+				m := service.NewMessage(nil)
+				m.MetaSetMut("kafka_key", append([]byte(nil), raw...))
+				return m
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+digest: '`+tc.digest+`'
+bins: 'root.name = "Ada"'
+tombstone_as_delete: false
+`)
+			op, err := mapOne(t, w, tc.msg())
+			require.NoError(t, err)
+			assertDigestKey(t, op.key, raw)
+		})
+	}
+}
+
 func TestDigestRejectsTwentyByteText(t *testing.T) {
 	// A 20-byte string is the length of a raw digest but is not Base64 of one.
 	// It must be rejected rather than used as raw bytes, which would address an
