@@ -16,8 +16,9 @@ package aerospike
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
+	"github.com/aerospike/aerospike-client-go/v8/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -136,29 +138,34 @@ func ensureSCRoster(t *testing.T, client *as.Client) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if scRosterReady(t, client) {
+		if scRosterReady(client) {
 			return
 		}
-		stageSCRoster(t, client)
+		stageSCRoster(client)
 		time.Sleep(time.Second)
 	}
 	t.Fatal("namespace sc roster does not include the live nodes")
 }
 
-func scRosterReady(t *testing.T, client *as.Client) bool {
-	t.Helper()
+func scRosterReady(client *as.Client) bool {
 	nodes := client.GetNodes()
 	if len(nodes) < 2 {
 		return false
 	}
 	for _, node := range nodes {
-		if namespaceField(t, node, eeSCNamespace, "ns_cluster_size") != "2" {
+		size, err := namespaceField(node, eeSCNamespace, "ns_cluster_size")
+		if err != nil || size != "2" {
 			return false
 		}
-		if namespaceField(t, node, eeSCNamespace, "dead_partitions") != "0" {
+		dead, err := namespaceField(node, eeSCNamespace, "dead_partitions")
+		if err != nil || dead != "0" {
 			return false
 		}
-		active, observed := rosterNodeSets(infoValue(t, node, "roster:namespace="+eeSCNamespace))
+		body, err := infoValue(node, "roster:namespace="+eeSCNamespace)
+		if err != nil {
+			return false
+		}
+		active, observed := rosterNodeSets(body)
 		if nodeCount(observed) != 2 || active != observed {
 			return false
 		}
@@ -166,23 +173,36 @@ func scRosterReady(t *testing.T, client *as.Client) bool {
 	return true
 }
 
-func stageSCRoster(t *testing.T, client *as.Client) {
-	t.Helper()
+func stageSCRoster(client *as.Client) {
 	nodes := client.GetNodes()
 	var principal *as.Node
 	var active, observed string
 	dead := false
 	for _, node := range nodes {
-		id := infoValue(t, node, "node")
-		stats := infoValue(t, node, "statistics")
+		id, err := infoValue(node, "node")
+		if err != nil {
+			return
+		}
+		stats, err := infoValue(node, "statistics")
+		if err != nil {
+			return
+		}
 		if strings.EqualFold(id, statField(stats, "cluster_principal")) {
 			principal = node
 		}
-		rosterActive, rosterObserved := rosterNodeSets(infoValue(t, node, "roster:namespace="+eeSCNamespace))
+		body, err := infoValue(node, "roster:namespace="+eeSCNamespace)
+		if err != nil {
+			return
+		}
+		rosterActive, rosterObserved := rosterNodeSets(body)
 		if rosterObserved != "" {
 			active, observed = rosterActive, rosterObserved
 		}
-		if namespaceField(t, node, eeSCNamespace, "dead_partitions") != "0" {
+		deadParts, err := namespaceField(node, eeSCNamespace, "dead_partitions")
+		if err != nil {
+			return
+		}
+		if deadParts != "0" {
 			dead = true
 		}
 	}
@@ -193,32 +213,43 @@ func stageSCRoster(t *testing.T, client *as.Client) {
 	}
 	changed := false
 	if active != observed {
-		infoValue(t, principal, "roster-set:namespace="+eeSCNamespace+";nodes="+observed)
+		if _, err := infoValue(principal, "roster-set:namespace="+eeSCNamespace+";nodes="+observed); err != nil {
+			return
+		}
 		changed = true
 	}
 	if dead {
 		// Every node has to accept revive. Sending it only to the principal
 		// leaves the other node's partitions dead.
 		for _, node := range nodes {
-			infoValue(t, node, "revive:namespace="+eeSCNamespace)
+			if _, err := infoValue(node, "revive:namespace="+eeSCNamespace); err != nil {
+				return
+			}
 		}
 		changed = true
 	}
 	if changed {
-		infoValue(t, principal, "recluster:")
+		_, _ = infoValue(principal, "recluster:")
 	}
 }
 
-func infoValue(t *testing.T, node *as.Node, command string) string {
-	t.Helper()
+// infoValue runs one info command. Callers in the roster retry treat an error
+// as "not ready yet" and try again. Failing the test here would turn one
+// brief error while the cluster is forming into a hard failure.
+func infoValue(node *as.Node, command string) (string, error) {
 	info, err := node.RequestInfo(as.NewInfoPolicy(), command)
-	require.NoError(t, err)
-	return strings.TrimSpace(info[command])
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(info[command]), nil
 }
 
-func namespaceField(t *testing.T, node *as.Node, namespace, field string) string {
-	t.Helper()
-	return statField(infoValue(t, node, "namespace/"+namespace), field)
+func namespaceField(node *as.Node, namespace, field string) (string, error) {
+	body, err := infoValue(node, "namespace/"+namespace)
+	if err != nil {
+		return "", err
+	}
+	return statField(body, field), nil
 }
 
 func statField(body, name string) string {
@@ -644,45 +675,63 @@ func secHost(t *testing.T) string {
 	return host
 }
 
-// secUserMu serializes user creation. The secured node keeps accounts only in
-// its own filesystem, so a container recreate leaves admin and drops rpcn.
-var secUserMu sync.Mutex
+// secUserOnce creates rpcn/rpcnpass once per test process. The account is
+// stored in the node's smd directory, mounted at smd/ee-sec, so a container
+// recreate keeps it. CreateUser runs against AEROSPIKE_SEC_HOST as admin,
+// so the tests are not tied to the as-ee-sec container name.
+var (
+	secUserOnce sync.Once
+	secUserErr  error
+)
 
-// ensureSecUser creates rpcn/rpcnpass when a recreate dropped it. "already
-// exists" is success. The node may still be opening its ports, so this retries.
 func ensureSecUser(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Fatalf("docker is required to create user rpcn on as-ee-sec: %v", err)
-	}
-	secUserMu.Lock()
-	defer secUserMu.Unlock()
-
-	const create = "manage acl create user rpcn password rpcnpass roles read-write sys-admin"
-	const grant = "manage acl grant user rpcn roles read-write sys-admin"
-	deadline := time.Now().Add(30 * time.Second)
-	var last string
-	for time.Now().Before(deadline) {
-		last = asadm(t, create)
-		if strings.Contains(last, "Successfully created user") || strings.Contains(last, "already exists") {
-			_ = asadm(t, grant)
-			return
-		}
-		if strings.Contains(last, "No such container") {
-			t.Fatalf("as-ee-sec is not running; start it with testdata/ee/up.sh\n%s", last)
-		}
-		time.Sleep(time.Second)
-	}
-	t.Fatalf("could not create user rpcn on as-ee-sec: %s", last)
+	secUserOnce.Do(func() {
+		secUserErr = createSecUser()
+	})
+	require.NoError(t, secUserErr)
 }
 
-func asadm(t *testing.T, command string) string {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "exec", "as-ee-sec", "asadm", "-U", "admin", "-P", "admin", "--enable", "-e", command)
-	out, _ := cmd.CombinedOutput()
-	return string(out)
+func createSecUser() error {
+	raw := os.Getenv("AEROSPIKE_SEC_HOST")
+	if raw == "" {
+		return errors.New("AEROSPIKE_SEC_HOST is unset; creating user rpcn needs the secured node's plaintext address")
+	}
+	host, err := parseHost(raw)
+	if err != nil {
+		return fmt.Errorf("AEROSPIKE_SEC_HOST %q: %w", raw, err)
+	}
+	policy := as.NewClientPolicy()
+	policy.User = "admin"
+	policy.Password = "admin"
+	policy.Timeout = 5 * time.Second
+	policy.LoginTimeout = 5 * time.Second
+
+	const user = "rpcn"
+	roles := []string{"read-write", "sys-admin"}
+	deadline := time.Now().Add(30 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		client, connErr := as.NewClientWithPolicyAndHost(policy, host)
+		if connErr != nil {
+			last = connErr
+			time.Sleep(time.Second)
+			continue
+		}
+		createErr := client.CreateUser(nil, user, "rpcnpass", roles)
+		client.Close()
+		if createErr == nil || resultCodeIs(createErr, types.USER_ALREADY_EXISTS) {
+			return nil
+		}
+		last = createErr
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("creating user %s on %s: %w", user, raw, last)
+}
+
+func resultCodeIs(err error, code types.ResultCode) bool {
+	var ae as.Error
+	return errors.As(err, &ae) && ae.Matches(code)
 }
 
 func secWriter(t *testing.T, extraYAML string) *aerospikeWriter {
@@ -865,9 +914,13 @@ credentials:
 	err := w.Connect(ctx)
 	require.Error(t, err)
 	// The server has no LDAP service. It returns result code 90, which this
-	// client build does not name. A missing TLS config fails earlier, inside
-	// the client, and does not reach the server.
-	assert.Contains(t, err.Error(), "ResultCode 90")
+	// client build does not name. The client then wraps that as
+	// INVALID_NODE_ERROR (-3), and AerospikeError.As returns the outer error,
+	// so the code has to be matched down the chain. A missing TLS config
+	// fails earlier and does not reach the server.
+	var asErr as.Error
+	require.ErrorAs(t, err, &asErr)
+	assert.True(t, asErr.Matches(types.ResultCode(90)))
 	assert.NotContains(t, err.Error(), "External Authentication requires TLS")
 }
 
@@ -895,5 +948,10 @@ tls:
 	w := newTestWriter(t, yaml)
 	t.Cleanup(func() { _ = w.Close(context.Background()) })
 
-	require.Error(t, w.Connect(t.Context()), "a server cert signed by an unknown CA must be refused")
+	err := w.Connect(t.Context())
+	require.Error(t, err)
+	// A trusted CA with no client certificate fails the handshake too
+	// ("remote error: tls: handshake failure"). Only a verification failure
+	// shows that the unknown CA was refused.
+	assert.Contains(t, err.Error(), "tls: failed to verify certificate")
 }

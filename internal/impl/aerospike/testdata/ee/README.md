@@ -131,8 +131,10 @@ docker exec as-ee-tools aql-ee -c "SELECT * FROM test.rpa_ee WHERE PK='ttl-gone'
 Present after the write; gone after TTL + NSUP. Faster TTL checks (`24H`, `1D`, invalid `24X`) stay on CE `TestIntegrationTTL*`.
 
 Auth tests use `rpcn` / `rpcnpass`. That account lives in `smd/ee-sec`
-(`security.smd`) so a recreate keeps it. The auth tests also create it when
-it is missing. If create failed, the image may use a different admin password:
+(`security.smd`) so a recreate keeps it. The tests create it once per run
+with the Go client (`CreateUser` as `admin` / `admin` on `AEROSPIKE_SEC_HOST`)
+when it is missing. If that login fails, the image may use a different admin
+password:
 
 ```bash
 docker exec -it as-ee-sec asadm -U admin -P '<admin-password>' --enable \

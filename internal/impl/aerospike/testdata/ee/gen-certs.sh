@@ -7,7 +7,7 @@ mkdir -p "$CERTS"
 
 cd "$CERTS"
 if [[ ! -f ca.pem || ! -f ca.key || "${FORCE:-}" == "1" ]]; then
-  rm -f ca.pem ca.key ca.srl server.pem server.key client.pem client.key pki.pem pki.key
+  rm -f ca.pem ca.key ca.srl server.pem server.key client.pem client.key
   openssl req -x509 -newkey rsa:2048 -days 3650 -nodes \
     -subj "/CN=Aerospike EE test CA" \
     -keyout ca.key -out ca.pem
