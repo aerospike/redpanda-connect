@@ -104,6 +104,23 @@ func TestWriteBatchIgnoresRecordTooBig(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestWriteBatchAllIgnoredReturnsNil(t *testing.T) {
+	w := newTestWriter(t, baseConfig+"ignore_error_codes: [13]\n")
+	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
+		require.Len(t, recs, 2)
+		recs[0].BatchRec().ResultCode = types.RECORD_TOO_BIG
+		recs[1].BatchRec().ResultCode = types.RECORD_TOO_BIG
+		return nil
+	}
+
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		service.NewMessage([]byte(`{"id":"big-1","v":1}`)),
+		service.NewMessage([]byte(`{"id":"big-2","v":1}`)),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), w.ignoredTotal.Load())
+}
+
 func TestWriteBatchRecordTooBigStillFailsWhenNotListed(t *testing.T) {
 	w := newTestWriter(t, baseConfig)
 	w.operate = func(_ *as.BatchPolicy, recs []as.BatchRecordIfc) error {
