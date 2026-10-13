@@ -30,6 +30,11 @@ jobs:
         with:
           # TestNewSpecsHaveVersions reads the previous release tag.
           fetch-depth: 0
+          fetch-tags: true
+      - name: Fetch upstream release tags
+        # A fork does not carry the upstream vX.Y.Z tags. The version check
+        # needs the highest tag reachable from HEAD.
+        run: git fetch --no-tags https://github.com/redpanda-data/connect.git 'refs/tags/v*:refs/tags/v*'
       - name: Install Go
         uses: actions/setup-go@v6
         with:
@@ -64,6 +69,11 @@ jobs:
         with:
           # TestNewSpecsHaveVersions reads the release tags.
           fetch-depth: 0
+          fetch-tags: true
+      - name: Fetch upstream release tags
+        # A fork does not carry the upstream vX.Y.Z tags. The version check
+        # needs the highest tag reachable from HEAD.
+        run: git fetch --no-tags https://github.com/redpanda-data/connect.git 'refs/tags/v*:refs/tags/v*'
       - name: Install Go
         uses: actions/setup-go@v6
         with:

@@ -70,12 +70,14 @@ func retryableIgnoreLint() string {
 func outputSpec() *service.ConfigSpec {
 	spec := service.NewConfigSpec().
 		Beta().
-		Version("4.107.0").
+		Version("4.114.0").
 		Categories("Services").
-		Summary("Writes messages to an Aerospike cluster as records, batched and keyed by an interpolated primary key.").
+		Summary("Writes messages to an Aerospike cluster as records, batched and keyed by an interpolated primary key or digest.").
 		Description(`
-Each message is mapped to a single Aerospike record. The record key is built from the
-` + "`namespace`" + `, ` + "`set`" + ` and ` + "`key`" + ` fields, and the bins are produced by the
+Each message is mapped to a single Aerospike record. The record is addressed by
+` + "`namespace`" + `, ` + "`set`" + `, and either ` + "`key`" + ` or ` + "`digest`" + `.
+` + "`key`" + ` is a user key, which Aerospike hashes. ` + "`digest`" + ` is the 20-byte
+digest itself and the stored user key is null. The bins are produced by the
 ` + "`bins`" + ` Bloblang mapping.
 
 ### Shaping data
@@ -135,7 +137,7 @@ Aerospike has no client-side change feed.
 ` + service.OutputPerformanceDocs(true, true))
 
 	spec = spec.Fields(clientFields()...)
-	spec = spec.Fields(keyFields(`${! json("user_id") }`, `${! meta("kafka_key") }`)...)
+	spec = spec.Fields(outputKeyFields(`${! json("user_id") }`, `${! meta("kafka_key") }`)...)
 
 	spec = spec.Fields(
 		service.NewInterpolatedStringField(fieldOperation).
@@ -293,6 +295,20 @@ output:
     batching:
       count: 500
       period: 1s
+`,
+		).
+		Example(
+			"Write a record by digest",
+			"The producer already has the 20-byte Aerospike digest, carried as a standard Base64 JSON field. The stored user key is null. For a raw 20-byte digest, encode it in the mapping, for example `digest: '${! meta(\"kafka_key\").encode(\"base64\") }'`.",
+			`
+output:
+  aerospike:
+    hosts: [ "localhost:3000" ]
+    namespace: test
+    set: users
+    digest: '${! json("digest") }'
+    bins: 'root = this.without("digest")'
+    operation: replace
 `,
 		).
 		Example(

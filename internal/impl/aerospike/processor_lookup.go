@@ -55,7 +55,7 @@ func init() {
 func lookupSpec() *service.ConfigSpec {
 	spec := service.NewConfigSpec().
 		Beta().
-		Version("4.107.0").
+		Version("4.114.0").
 		Categories("Services").
 		Summary("Looks up Aerospike records by primary key and replaces each message with the record's bins.").
 		Description(`
