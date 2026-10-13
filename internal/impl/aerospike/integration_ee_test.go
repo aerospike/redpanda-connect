@@ -16,8 +16,11 @@ package aerospike
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +29,7 @@ import (
 	"time"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
+	"github.com/aerospike/aerospike-client-go/v8/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -76,6 +80,9 @@ bins: 'root = this.without("id")'
 	require.NoError(t, err)
 	t.Cleanup(client.Close)
 
+	if namespace == eeSCNamespace {
+		ensureSCRoster(t, client)
+	}
 	require.NoError(t, client.Truncate(nil, namespace, eeSet, nil))
 	// Truncate returns when the command is accepted, not when the set is empty.
 	// A write in that window is removed again, so the following read misses a
@@ -117,6 +124,182 @@ func eeRead(t *testing.T, client *as.Client, namespace, id string) *as.Record {
 	}
 	require.NoError(t, asErr)
 	return rec
+}
+
+// ensureSCRoster makes namespace sc writable. Two separate failures both
+// surface as "not connected":
+//
+//   - the saved roster names node ids that are gone, so ns_cluster_size stays 0
+//   - the roster matches, but a memory namespace restart has no stored
+//     partitions, so every partition is dead until each node is revived
+//
+// Revive is safe here only because this namespace is memory-backed test data.
+func ensureSCRoster(t *testing.T, client *as.Client) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if scRosterReady(client) {
+			return
+		}
+		stageSCRoster(client)
+		time.Sleep(time.Second)
+	}
+	t.Fatal("namespace sc roster does not include the live nodes")
+}
+
+func scRosterReady(client *as.Client) bool {
+	nodes := client.GetNodes()
+	if len(nodes) < 2 {
+		return false
+	}
+	for _, node := range nodes {
+		size, err := namespaceField(node, eeSCNamespace, "ns_cluster_size")
+		if err != nil || size != "2" {
+			return false
+		}
+		dead, err := namespaceField(node, eeSCNamespace, "dead_partitions")
+		if err != nil || dead != "0" {
+			return false
+		}
+		body, err := infoValue(node, "roster:namespace="+eeSCNamespace)
+		if err != nil {
+			return false
+		}
+		active, observed := rosterNodeSets(body)
+		if nodeCount(observed) != 2 || active != observed {
+			return false
+		}
+	}
+	return true
+}
+
+func stageSCRoster(client *as.Client) {
+	nodes := client.GetNodes()
+	var principal *as.Node
+	var active, observed string
+	dead := false
+	for _, node := range nodes {
+		id, err := infoValue(node, "node")
+		if err != nil {
+			return
+		}
+		stats, err := infoValue(node, "statistics")
+		if err != nil {
+			return
+		}
+		if strings.EqualFold(id, statField(stats, "cluster_principal")) {
+			principal = node
+		}
+		body, err := infoValue(node, "roster:namespace="+eeSCNamespace)
+		if err != nil {
+			return
+		}
+		rosterActive, rosterObserved := rosterNodeSets(body)
+		if rosterObserved != "" {
+			active, observed = rosterActive, rosterObserved
+		}
+		deadParts, err := namespaceField(node, eeSCNamespace, "dead_partitions")
+		if err != nil {
+			return
+		}
+		if deadParts != "0" {
+			dead = true
+		}
+	}
+	// A one-node observed set is the cluster still forming. Staging it would
+	// lock the namespace at replication factor 1.
+	if principal == nil || nodeCount(observed) != 2 {
+		return
+	}
+	changed := false
+	if active != observed {
+		if _, err := infoValue(principal, "roster-set:namespace="+eeSCNamespace+";nodes="+observed); err != nil {
+			return
+		}
+		changed = true
+	}
+	if dead {
+		// Every node has to accept revive. Sending it only to the principal
+		// leaves the other node's partitions dead.
+		for _, node := range nodes {
+			if _, err := infoValue(node, "revive:namespace="+eeSCNamespace); err != nil {
+				return
+			}
+		}
+		changed = true
+	}
+	if changed {
+		_, _ = infoValue(principal, "recluster:")
+	}
+}
+
+// infoValue runs one info command. Callers in the roster retry treat an error
+// as "not ready yet" and try again. Failing the test here would turn one
+// brief error while the cluster is forming into a hard failure.
+func infoValue(node *as.Node, command string) (string, error) {
+	info, err := node.RequestInfo(as.NewInfoPolicy(), command)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(info[command]), nil
+}
+
+func namespaceField(node *as.Node, namespace, field string) (string, error) {
+	body, err := infoValue(node, "namespace/"+namespace)
+	if err != nil {
+		return "", err
+	}
+	return statField(body, field), nil
+}
+
+func statField(body, name string) string {
+	for part := range strings.FieldsFuncSeq(body, func(r rune) bool { return r == ';' || r == ':' }) {
+		key, value, ok := strings.Cut(part, "=")
+		if ok && key == name {
+			return value
+		}
+	}
+	return ""
+}
+
+// rosterNodeSets returns the active roster and the observed nodes, each as a
+// sorted comma-separated set. "null" and empty entries are dropped.
+func rosterNodeSets(body string) (active, observed string) {
+	return nodeSet(statField(body, "roster")), nodeSet(statField(body, "observed_nodes"))
+}
+
+func nodeCount(set string) int {
+	if set == "" {
+		return 0
+	}
+	return strings.Count(set, ",") + 1
+}
+
+func nodeSet(raw string) string {
+	parts := strings.Split(raw, ",")
+	kept := parts[:0]
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || strings.EqualFold(part, "null") {
+			continue
+		}
+		kept = append(kept, strings.ToUpper(part))
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	slices.Sort(kept)
+	return strings.Join(kept, ",")
+}
+
+func TestRosterNodeSets(t *testing.T) {
+	active, observed := rosterNodeSets("roster=null:pending_roster=BB91DDA83FEAFC6,BB917465FFBF3E6:observed_nodes=BB917465FFBF3E6,BB91DDA83FEAFC6")
+	assert.Empty(t, active)
+	assert.Equal(t, "BB917465FFBF3E6,BB91DDA83FEAFC6", observed)
+
+	active, observed = rosterNodeSets("roster=bb917465ffbf3e6,bb91dda83feafc6:observed_nodes=BB91DDA83FEAFC6,BB917465FFBF3E6")
+	assert.Equal(t, observed, active)
+	assert.NotEmpty(t, observed)
 }
 
 // nsStat sums a namespace statistic across every node, so replica-side effects
@@ -488,7 +671,67 @@ func secHost(t *testing.T) string {
 	if host == "" {
 		t.Skip("AEROSPIKE_SEC_HOST is unset; access-control tests need a secured Enterprise node")
 	}
+	ensureSecUser(t)
 	return host
+}
+
+// secUserOnce creates rpcn/rpcnpass once per test process. The account is
+// stored in the node's smd directory, mounted at smd/ee-sec, so a container
+// recreate keeps it. CreateUser runs against AEROSPIKE_SEC_HOST as admin,
+// so the tests are not tied to the as-ee-sec container name.
+var (
+	secUserOnce sync.Once
+	secUserErr  error
+)
+
+func ensureSecUser(t *testing.T) {
+	t.Helper()
+	secUserOnce.Do(func() {
+		secUserErr = createSecUser()
+	})
+	require.NoError(t, secUserErr)
+}
+
+func createSecUser() error {
+	raw := os.Getenv("AEROSPIKE_SEC_HOST")
+	if raw == "" {
+		return errors.New("AEROSPIKE_SEC_HOST is unset; creating user rpcn needs the secured node's plaintext address")
+	}
+	host, err := parseHost(raw)
+	if err != nil {
+		return fmt.Errorf("AEROSPIKE_SEC_HOST %q: %w", raw, err)
+	}
+	policy := as.NewClientPolicy()
+	policy.User = "admin"
+	policy.Password = "admin"
+	policy.Timeout = 5 * time.Second
+	policy.LoginTimeout = 5 * time.Second
+
+	const user = "rpcn"
+	roles := []string{"read-write", "sys-admin"}
+	deadline := time.Now().Add(30 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		client, connErr := as.NewClientWithPolicyAndHost(policy, host)
+		if connErr != nil {
+			last = connErr
+			time.Sleep(time.Second)
+			continue
+		}
+		createErr := client.CreateUser(nil, user, "rpcnpass", roles)
+		client.Close()
+		if createErr == nil || resultCodeIs(createErr, types.USER_ALREADY_EXISTS) {
+			return nil
+		}
+		last = createErr
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("creating user %s on %s: %w", user, raw, last)
+}
+
+func resultCodeIs(err error, code types.ResultCode) bool {
+	var ae as.Error
+	return errors.As(err, &ae) && ae.Matches(code)
 }
 
 func secWriter(t *testing.T, extraYAML string) *aerospikeWriter {
@@ -560,15 +803,42 @@ func resolveTLSCA(t *testing.T, ca string) string {
 	return ""
 }
 
-// TLS needs the host spec to carry the server's tls-name, which is the
-// host:tlsname:port form the connector documents.
-func TestEETLS(t *testing.T) {
-	host := os.Getenv("AEROSPIKE_TLS_HOST")
-	ca := os.Getenv("AEROSPIKE_TLS_CA")
-	if host == "" || ca == "" {
+// tlsMaterial is the secured Enterprise node. The TLS port requires a client
+// certificate (tls-authenticate-client any). client.pem is the CN rpcn
+// certificate used with password login.
+func tlsMaterial(t *testing.T) (host, ca, cert, key string) {
+	t.Helper()
+	host = os.Getenv("AEROSPIKE_TLS_HOST")
+	caEnv := os.Getenv("AEROSPIKE_TLS_CA")
+	if host == "" || caEnv == "" {
 		t.Skip("AEROSPIKE_TLS_HOST/AEROSPIKE_TLS_CA unset; TLS tests need a TLS-enabled Enterprise node")
 	}
-	ca = resolveTLSCA(t, ca)
+	ca = resolveTLSCA(t, caEnv)
+	dir := filepath.Dir(ca)
+	cert = filepath.Join(dir, "client.pem")
+	key = filepath.Join(dir, "client.key")
+	require.FileExists(t, cert, "run testdata/ee/gen-certs.sh; the TLS port requires a client certificate")
+	require.FileExists(t, key)
+	ensureSecUser(t)
+	return host, ca, cert, key
+}
+
+func tlsClientYAML(ca, cert, key string) string {
+	return `
+tls:
+  enabled: true
+  root_cas_file: ` + ca + `
+  client_certs:
+    - cert_file: ` + cert + `
+      key_file: ` + key + `
+`
+}
+
+// TLS needs the host spec to carry the server's tls-name, which is the
+// host:tlsname:port form the connector documents. Login is still the
+// internal password; the client certificate satisfies mutual TLS.
+func TestEETLS(t *testing.T) {
+	host, ca, cert, key := tlsMaterial(t)
 
 	yaml := `
 hosts: [ "` + host + `" ]
@@ -580,10 +850,7 @@ auth_mode: internal
 credentials:
   username: rpcn
   password: rpcnpass
-tls:
-  enabled: true
-  root_cas_file: ` + ca + `
-`
+` + tlsClientYAML(ca, cert, key)
 	w := newTestWriter(t, yaml)
 	t.Cleanup(func() { _ = w.Close(context.Background()) })
 
@@ -591,6 +858,70 @@ tls:
 	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
 		msg(t, `{"id":"tls1","v":"encrypted"}`),
 	}))
+}
+
+// PKI login sends no password. The certificate CN is the username rpcn.
+// This tools image cannot create a PKI-only user; show users lists rpcn
+// as password,PKI, so the same client certificate is used.
+func TestEEAuthPKI(t *testing.T) {
+	host, ca, cert, key := tlsMaterial(t)
+
+	yaml := `
+hosts: [ "` + host + `" ]
+namespace: ` + eeAPNamespace + `
+set: ` + eeSet + `
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+auth_mode: pki
+` + tlsClientYAML(ca, cert, key)
+	w := newTestWriter(t, yaml)
+	t.Cleanup(func() { _ = w.Close(context.Background()) })
+	require.NoError(t, w.Connect(t.Context()))
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"pki1","v":"cert"}`),
+	}))
+
+	client, err := as.NewClientWithPolicyAndHost(w.conf.client.Policy, w.conf.client.Hosts...)
+	require.NoError(t, err)
+	t.Cleanup(client.Close)
+	rec := eeRead(t, client, eeAPNamespace, "pki1")
+	require.NotNil(t, rec)
+	assert.Equal(t, "cert", rec.Bins["v"])
+}
+
+// This cluster has no LDAP service. External login must reach the server
+// over TLS and be refused, rather than fall back to the internal password.
+func TestEEAuthExternalRejected(t *testing.T) {
+	host, ca, cert, key := tlsMaterial(t)
+
+	yaml := `
+hosts: [ "` + host + `" ]
+namespace: ` + eeAPNamespace + `
+set: ` + eeSet + `
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+connect_timeout: 5s
+auth_mode: external
+credentials:
+  username: ldap-user
+  password: secret
+` + tlsClientYAML(ca, cert, key)
+	w := newTestWriter(t, yaml)
+	t.Cleanup(func() { _ = w.Close(context.Background()) })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	err := w.Connect(ctx)
+	require.Error(t, err)
+	// The server has no LDAP service. It returns result code 90, which this
+	// client build does not name. The client then wraps that as
+	// INVALID_NODE_ERROR (-3), and AerospikeError.As returns the outer error,
+	// so the code has to be matched down the chain. A missing TLS config
+	// fails earlier and does not reach the server.
+	var asErr as.Error
+	require.ErrorAs(t, err, &asErr)
+	assert.True(t, asErr.Matches(types.ResultCode(90)))
+	assert.NotContains(t, err.Error(), "External Authentication requires TLS")
 }
 
 // An untrusted CA has to fail the handshake rather than fall back to plaintext
@@ -617,5 +948,10 @@ tls:
 	w := newTestWriter(t, yaml)
 	t.Cleanup(func() { _ = w.Close(context.Background()) })
 
-	require.Error(t, w.Connect(t.Context()), "a server cert signed by an unknown CA must be refused")
+	err := w.Connect(t.Context())
+	require.Error(t, err)
+	// A trusted CA with no client certificate fails the handshake too
+	// ("remote error: tls: handshake failure"). Only a verification failure
+	// shows that the unknown CA was refused.
+	assert.Contains(t, err.Error(), "tls: failed to verify certificate")
 }

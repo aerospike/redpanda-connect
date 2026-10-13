@@ -18,6 +18,7 @@ services:
       - "3100:3000"
     volumes:
       - ./as-ee-1.conf:/opt/rpcn/aerospike.conf:ro
+      - ./smd/ee-1:/opt/aerospike/smd
       - ${AEROSPIKE_FEATURE_KEY:?set AEROSPIKE_FEATURE_KEY to your features.conf}:/opt/rpcn/features.conf:ro
     command: ["--config-file", "/opt/rpcn/aerospike.conf"]
 
@@ -29,6 +30,7 @@ services:
       - "3110:3000"
     volumes:
       - ./as-ee-2.conf:/opt/rpcn/aerospike.conf:ro
+      - ./smd/ee-2:/opt/aerospike/smd
       - ${AEROSPIKE_FEATURE_KEY:?set AEROSPIKE_FEATURE_KEY to your features.conf}:/opt/rpcn/features.conf:ro
     command: ["--config-file", "/opt/rpcn/aerospike.conf"]
     depends_on:
@@ -43,6 +45,7 @@ services:
       - "4333:4333"
     volumes:
       - ./as-ee-sec.conf:/opt/rpcn/aerospike.conf:ro
+      - ./smd/ee-sec:/opt/aerospike/smd
       - ./certs:/opt/rpcn/certs:ro
       - ${AEROSPIKE_FEATURE_KEY:?set AEROSPIKE_FEATURE_KEY to your features.conf}:/opt/rpcn/features.conf:ro
     command: ["--config-file", "/opt/rpcn/aerospike.conf"]
