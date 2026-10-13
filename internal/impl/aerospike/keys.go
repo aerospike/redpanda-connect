@@ -118,16 +118,9 @@ type keyConfig struct {
 	Namespace   *service.InterpolatedString
 	Set         *service.InterpolatedString
 	Key         *service.InterpolatedString
-	Digest      *digestConfig
+	Digest      *service.InterpolatedString
 	KeyType     string
 	KeyEncoding string
-}
-
-// digestConfig is the parsed digest field. A static value is decoded once at
-// startup; otherwise text is interpolated and decoded per message.
-type digestConfig struct {
-	text   *service.InterpolatedString
-	static []byte
 }
 
 // parseKeyConfig reads the fields produced by keyFields or outputKeyFields.
@@ -167,8 +160,13 @@ func parseKeyConfig(conf *service.ParsedConfig) (*keyConfig, error) {
 		if k.KeyEncoding != "" && k.KeyEncoding != "utf8" {
 			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is set", fieldKeyEncoding, k.KeyEncoding, fieldKey)
 		}
-		if k.Digest, err = parseDigest(conf); err != nil {
+		if k.Digest, err = conf.FieldInterpolatedString(fieldDigest); err != nil {
 			return nil, err
+		}
+		if lit, ok := k.Digest.Static(); ok {
+			if _, err := decodeDigest(lit); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -196,8 +194,7 @@ type keyResolver struct {
 	key         *service.MessageBatchInterpolationExecutor
 	keyType     string
 	keyEncoding string
-	digest      *digestConfig
-	digestText  *service.MessageBatchInterpolationExecutor
+	digest      *service.MessageBatchInterpolationExecutor
 }
 
 // resolver binds key interpolation to a batch so batch-aware Bloblang works.
@@ -212,10 +209,7 @@ func (k *keyConfig) resolver(batch service.MessageBatch) *keyResolver {
 		r.key = batch.InterpolationExecutor(k.Key)
 	}
 	if k.Digest != nil {
-		r.digest = k.Digest
-		if k.Digest.text != nil {
-			r.digestText = batch.InterpolationExecutor(k.Digest.text)
-		}
+		r.digest = batch.InterpolationExecutor(k.Digest)
 	}
 	return r
 }
@@ -275,15 +269,13 @@ func (r *keyResolver) namespaceAndSet(index int) (string, string, error) {
 }
 
 func (r *keyResolver) resolveDigest(index int, namespace, setName string) (*as.Key, error) {
-	raw := r.digest.static
-	if raw == nil {
-		s, err := r.digestText.TryString(index)
-		if err != nil {
-			return nil, fmt.Errorf("interpolating '%v': %w", fieldDigest, err)
-		}
-		if raw, err = decodeDigest(s); err != nil {
-			return nil, err
-		}
+	s, err := r.digest.TryString(index)
+	if err != nil {
+		return nil, fmt.Errorf("interpolating '%v': %w", fieldDigest, err)
+	}
+	raw, err := decodeDigest(s)
+	if err != nil {
+		return nil, err
 	}
 	// A nil user key is stored as Aerospike null and is not sent, even when
 	// send_key is set. The digest is the record address.
@@ -292,22 +284,6 @@ func (r *keyResolver) resolveDigest(index int, namespace, setName string) (*as.K
 		return nil, fmt.Errorf("building record digest: %w", asErr)
 	}
 	return key, nil
-}
-
-// parseDigest reads the digest field of the output spec. A static value is
-// decoded here so a malformed literal fails at startup.
-func parseDigest(conf *service.ParsedConfig) (*digestConfig, error) {
-	text, err := conf.FieldInterpolatedString(fieldDigest)
-	if err != nil {
-		return nil, err
-	}
-	d := &digestConfig{text: text}
-	if lit, ok := text.Static(); ok {
-		if d.static, err = decodeDigest(lit); err != nil {
-			return nil, err
-		}
-	}
-	return d, nil
 }
 
 // decodeDigest decodes a standard Base64 digest into the 20 bytes Aerospike
