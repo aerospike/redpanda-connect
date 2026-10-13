@@ -17,7 +17,6 @@ package aerospike
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/hex"
 	"testing"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
@@ -606,61 +605,6 @@ bins: 'root = this.without("digest")'
 	assert.Equal(t, keyID(first), keyID(second))
 }
 
-func TestDigestKafkaKeyBytes(t *testing.T) {
-	raw := make([]byte, digestLen)
-	for i := range raw {
-		raw[i] = byte(i + 1)
-	}
-	w := newTestWriter(t, `
-hosts: [ "localhost:3000" ]
-namespace: test
-set: users
-digest: '${! meta("kafka_key") }'
-digest_encoding: raw
-bins: 'root.name = "Ada"'
-`)
-
-	msg := service.NewMessage([]byte(`{}`))
-	msg.MetaSetMut("kafka_key", raw)
-	op, err := mapOne(t, w, msg)
-	require.NoError(t, err)
-	assertDigestKey(t, op.key, raw)
-	assert.Equal(t, opWrite, op.kind)
-}
-
-func TestDigestMetadataBytes(t *testing.T) {
-	raw := bytes.Repeat([]byte{0xab}, digestLen)
-	w := newTestWriter(t, `
-hosts: [ "localhost:3000" ]
-namespace: test
-set: users
-digest: '${! metadata("kafka_key") }'
-digest_encoding: raw
-bins: 'root.name = "Ada"'
-`)
-
-	msg := service.NewMessage(nil)
-	msg.MetaSetMut("kafka_key", append([]byte(nil), raw...))
-	op, err := mapOne(t, w, msg)
-	require.NoError(t, err)
-	assertDigestKey(t, op.key, raw)
-}
-
-func TestDigestContentString(t *testing.T) {
-	raw := bytes.Repeat([]byte{0x22}, digestLen)
-	w := newTestWriter(t, `
-hosts: [ "localhost:3000" ]
-namespace: test
-set: users
-digest: '${! content().string() }'
-bins: 'root.name = "Ada"'
-`)
-
-	op, err := mapOne(t, w, service.NewMessage([]byte(base64.StdEncoding.EncodeToString(raw))))
-	require.NoError(t, err)
-	assertDigestKey(t, op.key, raw)
-}
-
 func TestDigestContentBase64(t *testing.T) {
 	raw := bytes.Repeat([]byte{0x22}, digestLen)
 	w := newTestWriter(t, `
@@ -676,41 +620,10 @@ bins: 'root.name = "Ada"'
 	assertDigestKey(t, op.key, raw)
 }
 
-func TestDigestContentRaw(t *testing.T) {
-	raw := bytes.Repeat([]byte{0xfe}, digestLen)
-	w := newTestWriter(t, `
-hosts: [ "localhost:3000" ]
-namespace: test
-set: users
-digest: '${! content() }'
-digest_encoding: raw
-bins: 'root.name = "Ada"'
-`)
-
-	op, err := mapOne(t, w, service.NewMessage(append([]byte(nil), raw...)))
-	require.NoError(t, err)
-	assertDigestKey(t, op.key, raw)
-}
-
-func TestDigestHex(t *testing.T) {
-	raw := bytes.Repeat([]byte{0xc4}, digestLen)
-	w := newTestWriter(t, `
-hosts: [ "localhost:3000" ]
-namespace: test
-set: users
-digest: '${! json("digest") }'
-digest_encoding: hex
-bins: 'root = this.without("digest")'
-`)
-
-	op, err := mapOne(t, w, service.NewMessage([]byte(`{"digest":"`+hex.EncodeToString(raw)+`","name":"Ada"}`)))
-	require.NoError(t, err)
-	assertDigestKey(t, op.key, raw)
-}
-
-func TestDigestBase64DoesNotFallBackToRaw(t *testing.T) {
-	// A 20-character string is valid Base64 of 15 bytes. It must be rejected
-	// rather than used as 20 raw bytes, which would address an arbitrary record.
+func TestDigestRejectsTwentyByteText(t *testing.T) {
+	// A 20-byte string is the length of a raw digest but is not Base64 of one.
+	// It must be rejected rather than used as raw bytes, which would address an
+	// arbitrary record.
 	w := newTestWriter(t, `
 hosts: [ "localhost:3000" ]
 namespace: test
@@ -752,20 +665,19 @@ bins: 'root.name = "Ada"'
 	assertDigestKey(t, key, raw)
 }
 
-func TestDigestTombstoneUsesKafkaKey(t *testing.T) {
+func TestDigestTombstoneUsesMetadata(t *testing.T) {
 	raw := bytes.Repeat([]byte{0x7f}, digestLen)
 	w := newTestWriter(t, `
 hosts: [ "localhost:3000" ]
 namespace: test
 set: users
-digest: '${! meta("kafka_key") }'
-digest_encoding: raw
+digest: '${! meta("as_digest") }'
 bins: 'root = this'
 tombstone_as_delete: true
 `)
 
 	msg := service.NewMessage(nil)
-	msg.MetaSetMut("kafka_key", raw)
+	msg.MetaSetMut("as_digest", base64.StdEncoding.EncodeToString(raw))
 	op, err := mapOne(t, w, msg)
 	require.NoError(t, err)
 	assert.Equal(t, opDelete, op.kind)
@@ -799,23 +711,6 @@ bins: 'root = this.without("digest")'
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
-}
-
-func TestDigestRejectsShortByteArray(t *testing.T) {
-	w := newTestWriter(t, `
-hosts: [ "localhost:3000" ]
-namespace: test
-set: users
-digest: '${! metadata("kafka_key") }'
-digest_encoding: raw
-bins: 'root.name = "Ada"'
-`)
-
-	msg := service.NewMessage(nil)
-	msg.MetaSetMut("kafka_key", []byte{1, 2, 3, 4})
-	_, err := mapOne(t, w, msg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "decoded to 4 bytes")
 }
 
 func TestDigestStaticValue(t *testing.T) {
@@ -894,16 +789,6 @@ namespace: test
 digest: 'YWI='
 `,
 			want: "decoded to 2 bytes",
-		},
-		{
-			name: "digest encoding with key",
-			yaml: `
-hosts: [ "localhost:3000" ]
-namespace: test
-key: id
-digest_encoding: raw
-`,
-			want: "digest_encoding",
 		},
 	}
 	for _, tc := range tests {

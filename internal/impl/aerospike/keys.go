@@ -29,17 +29,12 @@ import (
 
 // Configuration field names that address an Aerospike record.
 const (
-	fieldNamespace      = "namespace"
-	fieldSet            = "set"
-	fieldKey            = "key"
-	fieldDigest         = "digest"
-	fieldDigestEncoding = "digest_encoding"
-	fieldKeyType        = "key_type"
-	fieldKeyEncoding    = "key_encoding"
-
-	digestEncodingBase64 = "base64"
-	digestEncodingHex    = "hex"
-	digestEncodingRaw    = "raw"
+	fieldNamespace   = "namespace"
+	fieldSet         = "set"
+	fieldKey         = "key"
+	fieldDigest      = "digest"
+	fieldKeyType     = "key_type"
+	fieldKeyEncoding = "key_encoding"
 
 	// digestLen is the RIPEMD-160 length Aerospike uses to address a record.
 	// The client rejects any other length.
@@ -100,15 +95,10 @@ func addressFields(withDigest bool, keyExamples ...string) []*service.ConfigFiel
 	if withDigest {
 		fields = append(fields,
 			service.NewInterpolatedStringField(fieldDigest).
-				Description("The 20-byte record digest, as produced by another Aerospike client. The user key stored with the record is null. Set this or `key`, not both. `key_type` and `key_encoding` apply only to `key`, and `digest_encoding` applies only to `digest`.\n\nThis does not hash the value. `key` with `key_type: bytes` hashes those bytes and addresses a different record.").
+				Description("The 20-byte record digest as standard Base64, as produced by another Aerospike client. The user key stored with the record is null. Set this or `key`, not both. `key_type` and `key_encoding` apply only to `key`.\n\nThis does not hash the value. `key` with `key_type: bytes` hashes those bytes and addresses a different record.").
 				Optional().
 				Example(`${! json("digest") }`).
-				Example(`${! meta("kafka_key") }`).
-				Example(`${! content() }`),
-
-			service.NewStringEnumField(fieldDigestEncoding, digestEncodingBase64, digestEncodingHex, digestEncodingRaw).
-				Description("How to decode the interpolated `digest`. `base64` is standard Base64, the form Aerospike's Kafka outbound connector writes to JSON. `hex` is the form `aql` and `asadm` print. `raw` uses the resolved bytes as the digest, for a binary Kafka key from `meta(\"kafka_key\")` or a binary payload from `content()`. Each must yield exactly 20 bytes.").
-				Default(digestEncodingBase64),
+				Example(`${! meta("as_digest") }`),
 		)
 	}
 	return append(fields,
@@ -136,9 +126,8 @@ type keyConfig struct {
 // digestConfig is the parsed digest field. A static value is decoded once at
 // startup; otherwise text is interpolated and decoded per message.
 type digestConfig struct {
-	text     *service.InterpolatedString
-	encoding string
-	static   []byte
+	text   *service.InterpolatedString
+	static []byte
 }
 
 // parseKeyConfig reads the fields produced by keyFields or outputKeyFields.
@@ -170,16 +159,6 @@ func parseKeyConfig(conf *service.ParsedConfig) (*keyConfig, error) {
 	if keySet {
 		if k.Key, err = conf.FieldInterpolatedString(fieldKey); err != nil {
 			return nil, err
-		}
-		// Lookup does not declare digest_encoding.
-		if conf.Contains(fieldDigestEncoding) {
-			enc, err := conf.FieldString(fieldDigestEncoding)
-			if err != nil {
-				return nil, err
-			}
-			if enc != digestEncodingBase64 {
-				return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is set", fieldDigestEncoding, enc, fieldDigest)
-			}
 		}
 	} else {
 		if k.KeyType != "string" {
@@ -298,11 +277,11 @@ func (r *keyResolver) namespaceAndSet(index int) (string, string, error) {
 func (r *keyResolver) resolveDigest(index int, namespace, setName string) (*as.Key, error) {
 	raw := r.digest.static
 	if raw == nil {
-		b, err := r.digestText.TryBytes(index)
+		s, err := r.digestText.TryString(index)
 		if err != nil {
 			return nil, fmt.Errorf("interpolating '%v': %w", fieldDigest, err)
 		}
-		if raw, err = decodeDigest(b, r.digest.encoding); err != nil {
+		if raw, err = decodeDigest(s); err != nil {
 			return nil, err
 		}
 	}
@@ -315,57 +294,35 @@ func (r *keyResolver) resolveDigest(index int, namespace, setName string) (*as.K
 	return key, nil
 }
 
-// parseDigest reads the digest fields of the output spec. A static value is
+// parseDigest reads the digest field of the output spec. A static value is
 // decoded here so a malformed literal fails at startup.
 func parseDigest(conf *service.ParsedConfig) (*digestConfig, error) {
 	text, err := conf.FieldInterpolatedString(fieldDigest)
 	if err != nil {
 		return nil, err
 	}
-	encoding, err := conf.FieldString(fieldDigestEncoding)
-	if err != nil {
-		return nil, err
-	}
-	d := &digestConfig{text: text, encoding: encoding}
+	d := &digestConfig{text: text}
 	if lit, ok := text.Static(); ok {
-		if d.static, err = decodeDigest([]byte(lit), encoding); err != nil {
+		if d.static, err = decodeDigest(lit); err != nil {
 			return nil, err
 		}
 	}
 	return d, nil
 }
 
-// decodeDigest turns a resolved digest into the 20 bytes Aerospike addresses a
-// record by. The encoding is explicit because a 20-byte string can also be
-// valid Base64 or plain text, and guessing would address the wrong record.
-func decodeDigest(b []byte, encoding string) ([]byte, error) {
+// decodeDigest decodes a standard Base64 digest into the 20 bytes Aerospike
+// addresses a record by.
+func decodeDigest(s string) ([]byte, error) {
 	// A missing interpolated field stringifies to "null".
-	if len(b) == 0 || string(b) == "null" {
-		return nil, fmt.Errorf("field '%v' resolved to %q, which is not a usable digest; the source field is probably missing from this message", fieldDigest, b)
+	if s == "" || s == "null" {
+		return nil, fmt.Errorf("field '%v' resolved to %q, which is not a usable digest; the source field is probably missing from this message", fieldDigest, s)
 	}
-
-	var decoded []byte
-	switch encoding {
-	case digestEncodingRaw:
-		decoded = b
-	case digestEncodingHex:
-		decoded = make([]byte, hex.DecodedLen(len(b)))
-		if _, err := hex.Decode(decoded, b); err != nil {
-			return nil, fmt.Errorf("field '%v' is not valid hex as required by '%v': %w", fieldDigest, fieldDigestEncoding, err)
-		}
-	case digestEncodingBase64:
-		decoded = make([]byte, base64.StdEncoding.DecodedLen(len(b)))
-		n, err := base64.StdEncoding.Decode(decoded, b)
-		if err != nil {
-			return nil, fmt.Errorf("field '%v' is not standard Base64 as required by '%v': %w", fieldDigest, fieldDigestEncoding, err)
-		}
-		decoded = decoded[:n]
-	default:
-		return nil, fmt.Errorf("field '%v': unknown encoding %q", fieldDigestEncoding, encoding)
+	decoded, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("field '%v' is not standard Base64: %w", fieldDigest, err)
 	}
-
 	if len(decoded) != digestLen {
-		return nil, fmt.Errorf("field '%v' decoded to %d bytes with '%v' %q, which is not the Aerospike digest length of %d", fieldDigest, len(decoded), fieldDigestEncoding, encoding, digestLen)
+		return nil, fmt.Errorf("field '%v' decoded to %d bytes, which is not the Aerospike digest length of %d", fieldDigest, len(decoded), digestLen)
 	}
 	return decoded, nil
 }

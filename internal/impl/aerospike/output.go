@@ -299,7 +299,7 @@ output:
 		).
 		Example(
 			"Write a record by digest",
-			"The producer already has the 20-byte Aerospike digest, carried as a standard Base64 JSON field. The stored user key is null. For a binary 20-byte Kafka key, use `digest: '${! meta(\"kafka_key\") }'` with `digest_encoding: raw`.",
+			"The producer already has the 20-byte Aerospike digest, carried as a standard Base64 JSON field. The stored user key is null.",
 			`
 output:
   aerospike:
