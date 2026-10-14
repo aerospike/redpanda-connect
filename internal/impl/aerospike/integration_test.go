@@ -674,6 +674,28 @@ bins: 'root = this'
 	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{tombstone}))
 }
 
+func TestIntegrationTombstoneDisabledPreservesRecord(t *testing.T) {
+	w, client := outputSetup(t, `
+key: '${! meta("k") }'
+tombstone_as_delete: false
+bins: 'root = if content().length() == 0 { {"touch": true} } else { this }'
+`)
+
+	create := msg(t, `{"v":1}`)
+	create.MetaSet("k", "td1")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{create}))
+	require.NotNil(t, outputRead(t, client, "td1"))
+
+	empty := msg(t, ``)
+	empty.MetaSet("k", "td1")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{empty}))
+
+	rec := outputRead(t, client, "td1")
+	require.NotNil(t, rec, "an empty payload must not delete when tombstone handling is off")
+	assert.Equal(t, 1, rec.Bins["v"])
+	assert.Equal(t, true, rec.Bins["touch"])
+}
+
 func TestIntegrationFencing(t *testing.T) {
 	w, client := outputSetup(t, `
 fencing:
@@ -780,6 +802,25 @@ func TestIntegrationTTLFromJSON(t *testing.T) {
 			assert.InDelta(t, tc.want, rec.Expiration, 60)
 		})
 	}
+}
+
+// TestIntegrationTTLKeepPreservesVoidTime updates a record with ttl keep.
+// The void-time from the first write must stay; a fresh TTL would replace it.
+func TestIntegrationTTLKeepPreservesVoidTime(t *testing.T) {
+	w, client := outputSetup(t, "ttl: '${! json(\"ttl\") }'\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"tk1","v":1,"ttl":"24H"}`)}))
+	first := outputRead(t, client, "tk1")
+	require.NotNil(t, first)
+	assert.InDelta(t, 86400, first.Expiration, 60)
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"tk1","v":2,"ttl":"keep"}`)}))
+	second := outputRead(t, client, "tk1")
+	require.NotNil(t, second)
+	assert.Equal(t, 2, second.Bins["v"])
+	assert.InDelta(t, first.Expiration, second.Expiration, 5)
 }
 
 func TestIntegrationTTLRejectsInvalidJSON(t *testing.T) {
@@ -1065,6 +1106,21 @@ func TestIntegrationCreateOnlyFailsWhenExists(t *testing.T) {
 	assert.Equal(t, 1, rec.Bins["a"], "the failed create_only must not overwrite the record")
 }
 
+func TestIntegrationUpdateOnlyKeepsUntouchedBins(t *testing.T) {
+	w, client := outputSetup(t, "operation: '${! meta(\"op\") }'\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "write", `{"id":"uo2","a":1,"b":2}`)}))
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "update_only", `{"id":"uo2","a":9}`)}))
+
+	rec := outputRead(t, client, "uo2")
+	require.NotNil(t, rec)
+	assert.Equal(t, 9, rec.Bins["a"])
+	assert.Equal(t, 2, rec.Bins["b"], "update_only must leave bins the message did not name")
+}
+
 func TestIntegrationUpdateOnlyFailsWhenMissing(t *testing.T) {
 	w, client := outputSetup(t, "operation: update_only\n")
 
@@ -1099,6 +1155,24 @@ func TestIntegrationPartialFailure(t *testing.T) {
 	assert.NotNil(t, outputRead(t, client, "p1"))
 	assert.Nil(t, outputRead(t, client, "p2"))
 	assert.NotNil(t, outputRead(t, client, "p3"))
+}
+
+// Listing 13 acknowledges a record the server rejects as too big. The oversized
+// record is not stored, and the other record in the batch is.
+func TestIntegrationIgnoreRecordTooBig(t *testing.T) {
+	w, client := outputSetup(t, "ignore_error_codes: [13]\n")
+
+	// Aerospike 8 rejects a record above the namespace max-record-size, which
+	// defaults to 1MiB. The bin overhead puts this payload over that limit.
+	oversized := strings.Repeat("x", 1100*1024)
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"too-big","blob":"`+oversized+`"}`),
+		msg(t, `{"id":"kept","v":1}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), w.ignoredTotal.Load())
+	assert.Nil(t, outputRead(t, client, "too-big"))
+	assert.NotNil(t, outputRead(t, client, "kept"))
 }
 
 // Listing 21 acknowledges the local 15-byte rejection. The long-name record is

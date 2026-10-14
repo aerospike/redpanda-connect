@@ -241,6 +241,27 @@ bins: 'root = this'
 	assert.Empty(t, op.binOrder)
 }
 
+func TestMapMessageTombstoneDisabledStaysWrite(t *testing.T) {
+	w := newTestWriter(t, `
+hosts: [ "localhost:3000" ]
+namespace: test
+set: users
+key: '${! meta("k") }'
+bins: 'root.kept = "yes"'
+tombstone_as_delete: false
+`)
+
+	msg := service.NewMessage([]byte(``))
+	msg.MetaSet("k", "u1")
+
+	op, err := mapOne(t, w, msg)
+	require.NoError(t, err)
+	assert.Equal(t, opWrite, op.kind)
+	assert.Equal(t, "u1", op.key.Value().GetObject())
+	assert.Equal(t, []string{"kept"}, op.binOrder)
+	assert.Equal(t, "yes", op.bins["kept"])
+}
+
 func TestMapMessageStructuredObjectIsNotTombstone(t *testing.T) {
 	w := newTestWriter(t, baseConfig)
 
