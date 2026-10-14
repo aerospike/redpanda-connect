@@ -17,6 +17,7 @@ package aerospike
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,34 @@ func TestFromAerospikeMapKeys(t *testing.T) {
 		},
 	}
 	assert.Equal(t, want, got)
+}
+
+// TestFromAerospikeOrderedMap covers key-ordered maps, which the client unpacks
+// as []as.MapPair rather than map[any]any.
+func TestFromAerospikeOrderedMap(t *testing.T) {
+	in := []as.MapPair{
+		{Key: "name", Value: "Ada"},
+		{Key: 1, Value: "int key"},
+		{Key: "nested", Value: map[any]any{
+			"list": []any{[]as.MapPair{{Key: "deep", Value: true}}},
+		}},
+		{Key: "empty", Value: []as.MapPair{}},
+	}
+
+	got := fromAerospike(in)
+
+	want := map[string]any{
+		"name": "Ada",
+		"1":    "int key",
+		"nested": map[string]any{
+			"list": []any{map[string]any{"deep": true}},
+		},
+		"empty": map[string]any{},
+	}
+	assert.Equal(t, want, got)
+
+	_, err := json.Marshal(got)
+	require.NoError(t, err)
 }
 
 func TestFromAerospikePassthrough(t *testing.T) {

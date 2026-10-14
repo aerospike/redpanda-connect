@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+
+	as "github.com/aerospike/aerospike-client-go/v8"
 )
 
 // maxBinNameLen is a hard server limit. Exceeding it is rejected with
@@ -142,12 +144,22 @@ func convertFloat(f float64, coerceInts bool) any {
 // strings, so a map bin unpacks as map[any]any, which encoding/json cannot
 // marshal at all. Keys are stringified, which is lossy for exotic key types but
 // is the only representation JSON has.
+//
+// A key-ordered map unpacks as []as.MapPair instead. Left alone it would
+// serialise as a list of {Key, Value} structs, or fail outright if a value
+// holds a map[any]any.
 func fromAerospike(v any) any {
 	switch t := v.(type) {
 	case map[any]any:
 		out := make(map[string]any, len(t))
 		for k, val := range t {
 			out[stringifyKey(k)] = fromAerospike(val)
+		}
+		return out
+	case []as.MapPair:
+		out := make(map[string]any, len(t))
+		for _, p := range t {
+			out[stringifyKey(p.Key)] = fromAerospike(p.Value)
 		}
 		return out
 	case map[string]any:

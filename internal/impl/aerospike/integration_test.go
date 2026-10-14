@@ -1440,6 +1440,44 @@ func TestIntegrationNestedCDTsBecomeJSON(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestIntegrationKeyOrderedMapBecomesJSON seeds a map the way Java and Python
+// clients commonly write it, with MapPolicy KEY_ORDERED. The client unpacks
+// that as []as.MapPair, and the nested value as map[any]any.
+func TestIntegrationKeyOrderedMapBecomesJSON(t *testing.T) {
+	p, client := lookupSetup(t, "")
+
+	key, asErr := as.NewKey(integrationNamespace, integrationLookupSet, "ordered")
+	require.NoError(t, asErr)
+	policy := as.NewMapPolicy(as.MapOrder.KEY_ORDERED, as.MapWriteMode.UPDATE)
+	_, asErr = client.Operate(nil, key,
+		as.MapPutItemsOp(policy, "prefs", map[any]any{
+			"theme": "dark",
+			"n":     3,
+			"inner": map[string]any{"tags": []any{"a", "b"}},
+		}),
+	)
+	require.NoError(t, asErr)
+
+	rec, asErr := client.Get(nil, key, "prefs")
+	require.NoError(t, asErr)
+	require.IsType(t, []as.MapPair{}, rec.Bins["prefs"], "seeded map should be key-ordered")
+
+	out, err := p.ProcessBatch(t.Context(),
+		service.MessageBatch{service.NewMessage([]byte(`{"user_id":"ordered"}`))})
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]any{
+		"prefs": map[string]any{
+			"theme": "dark",
+			"n":     3,
+			"inner": map[string]any{"tags": []any{"a", "b"}},
+		},
+	}, structured(t, out[0][0]))
+
+	_, err = out[0][0].AsBytes()
+	require.NoError(t, err)
+}
+
 func TestIntegrationNotFoundNull(t *testing.T) {
 	p, _ := lookupSetup(t, "")
 
