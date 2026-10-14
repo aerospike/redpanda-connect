@@ -94,14 +94,3 @@ func parseTTLSeconds(lower string) (int64, error) {
 	}
 	return secs, nil
 }
-
-// formatTTL renders a record's expiration in the form parseTTL accepts, so a
-// TTL read by aerospike_lookup can be fed straight back into the output's ttl
-// field. The client reports a record that never expires as a sentinel rather
-// than a duration, which would otherwise surface to the user as "4294967295".
-func formatTTL(expiration uint32) string {
-	if expiration == as.TTLDontExpire {
-		return "never"
-	}
-	return (time.Duration(expiration) * time.Second).String()
-}
