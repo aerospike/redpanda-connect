@@ -37,7 +37,7 @@ import (
 )
 
 // These exercise the behaviour a single-node Community server cannot reach:
-// durable deletes, replica placement, strong consistency, access control and
+// durable deletes, replicated commits, strong consistency, access control and
 // TLS. They need an Enterprise cluster with replication-factor 2, an AP
 // namespace `test` and a strong-consistency namespace `sc`, addressed by
 // AEROSPIKE_EE_HOSTS.
@@ -89,21 +89,6 @@ bins: 'root = this.without("id")'
 	// record the batch call just reported as stored.
 	waitUntilSetEmpty(t, client, namespace, eeSet)
 	return w, client
-}
-
-func eeLookup(t *testing.T, namespace, extraYAML string) *lookupProcessor {
-	t.Helper()
-
-	yaml := `
-hosts: [ ` + quoteHosts(eeHosts(t)) + ` ]
-namespace: ` + namespace + `
-set: ` + eeSet + `
-key: '${! json("id") }'
-` + extraYAML
-
-	p := newTestProcessor(t, yaml)
-	t.Cleanup(func() { _ = p.Close(context.Background()) })
-	return p
 }
 
 func quoteHosts(csv string) string {
@@ -386,8 +371,8 @@ func TestEEClusterIsMultiNode(t *testing.T) {
 	nodes := client.GetNodes()
 	require.GreaterOrEqual(t, len(nodes), 2, "these tests are meaningless without replicas")
 
-	// Replication factor has to be above one or commit_level and replica are
-	// both no-ops no matter what the tests assert.
+	// Replication factor has to be above one or commit_level is a no-op no
+	// matter what the tests assert.
 	assert.GreaterOrEqual(t, nsStat(t, client, eeAPNamespace, "effective_replication_factor"), int64(2)*int64(len(nodes)))
 }
 
@@ -539,59 +524,17 @@ func TestEECommitLevels(t *testing.T) {
 	}
 }
 
-// Every replica policy has to return the record. With replication-factor 2 and
-// two nodes, master_proles and random genuinely reach a non-master copy.
-func TestEEReplicaPolicies(t *testing.T) {
-	w, client := eeWriter(t, eeAPNamespace, "")
-	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
-		msg(t, `{"id":"r1","v":"replicated"}`),
-	}))
-	require.NotNil(t, eeRead(t, client, eeAPNamespace, "r1"))
-
-	for _, replica := range []string{"sequence", "master", "master_proles", "random"} {
-		t.Run(replica, func(t *testing.T) {
-			for _, mode := range []string{"one", "all"} {
-				p := eeLookup(t, eeAPNamespace, `
-replica: `+replica+`
-read_mode_ap: `+mode+`
-bins: [ "v" ]
-`)
-				out, err := p.ProcessBatch(t.Context(), service.MessageBatch{msg(t, `{"id":"r1"}`)})
-				require.NoError(t, err)
-				require.Len(t, out, 1)
-				require.Len(t, out[0], 1)
-				require.NoError(t, out[0][0].GetError())
-				assert.Equal(t, map[string]any{"v": "replicated"}, structured(t, out[0][0]),
-					"replica=%v read_mode_ap=%v", replica, mode)
-			}
-		})
-	}
-}
-
 // Strong consistency is the mode the connector documents as requiring
-// commit_level: all, so both the write and every read mode must work against a
-// namespace with strong-consistency enabled and a roster set.
+// commit_level: all, so the write must work against a namespace with
+// strong-consistency enabled and a roster set.
 func TestEEStrongConsistency(t *testing.T) {
 	w, client := eeWriter(t, eeSCNamespace, "commit_level: all\n")
 	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
 		msg(t, `{"id":"sc1","v":"consistent"}`),
 	}))
-	require.NotNil(t, eeRead(t, client, eeSCNamespace, "sc1"))
-
-	for _, mode := range []string{"session", "linearize", "allow_replica", "allow_unavailable"} {
-		t.Run(mode, func(t *testing.T) {
-			p := eeLookup(t, eeSCNamespace, `
-read_mode_sc: `+mode+`
-bins: [ "v" ]
-`)
-			out, err := p.ProcessBatch(t.Context(), service.MessageBatch{msg(t, `{"id":"sc1"}`)})
-			require.NoError(t, err)
-			require.Len(t, out, 1)
-			require.Len(t, out[0], 1)
-			require.NoError(t, out[0][0].GetError())
-			assert.Equal(t, map[string]any{"v": "consistent"}, structured(t, out[0][0]))
-		})
-	}
+	rec := eeRead(t, client, eeSCNamespace, "sc1")
+	require.NotNil(t, rec)
+	assert.Equal(t, "consistent", rec.Bins["v"])
 }
 
 // A batch spanning both nodes must complete whether the client fans out across

@@ -17,7 +17,6 @@ package aerospike
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -76,65 +75,6 @@ func TestToAerospikeNested(t *testing.T) {
 	}, got)
 }
 
-// TestFromAerospikeMapKeys covers the conversion that actually matters on read:
-// Aerospike map keys are not restricted to strings, so a map bin unpacks as
-// map[any]any, which encoding/json cannot marshal at all.
-func TestFromAerospikeMapKeys(t *testing.T) {
-	in := map[any]any{
-		"name": "Ada",
-		1:      "int key",
-		"nested": map[any]any{
-			2: []any{map[any]any{"deep": true}},
-		},
-	}
-
-	got := fromAerospike(in)
-
-	want := map[string]any{
-		"name": "Ada",
-		"1":    "int key",
-		"nested": map[string]any{
-			"2": []any{map[string]any{"deep": true}},
-		},
-	}
-	assert.Equal(t, want, got)
-}
-
-// TestFromAerospikeOrderedMap covers key-ordered maps, which the client unpacks
-// as []as.MapPair rather than map[any]any.
-func TestFromAerospikeOrderedMap(t *testing.T) {
-	in := []as.MapPair{
-		{Key: "name", Value: "Ada"},
-		{Key: 1, Value: "int key"},
-		{Key: "nested", Value: map[any]any{
-			"list": []any{[]as.MapPair{{Key: "deep", Value: true}}},
-		}},
-		{Key: "empty", Value: []as.MapPair{}},
-	}
-
-	got := fromAerospike(in)
-
-	want := map[string]any{
-		"name": "Ada",
-		"1":    "int key",
-		"nested": map[string]any{
-			"list": []any{map[string]any{"deep": true}},
-		},
-		"empty": map[string]any{},
-	}
-	assert.Equal(t, want, got)
-
-	_, err := json.Marshal(got)
-	require.NoError(t, err)
-}
-
-func TestFromAerospikePassthrough(t *testing.T) {
-	assert.Equal(t, "x", fromAerospike("x"))
-	assert.Equal(t, 5, fromAerospike(5))
-	assert.Nil(t, fromAerospike(nil))
-	assert.Equal(t, []any{int64(1), "a"}, fromAerospike([]any{int64(1), "a"}))
-}
-
 func TestValidateBinName(t *testing.T) {
 	assert.NoError(t, validateBinName("a"))
 	assert.NoError(t, validateBinName("123456789012345")) // exactly 15
@@ -144,14 +84,6 @@ func TestValidateBinName(t *testing.T) {
 	assert.Contains(t, err.Error(), "exceeds the Aerospike limit of 15")
 
 	assert.Error(t, validateBinName(""))
-}
-
-func TestIsFencedTombstone(t *testing.T) {
-	assert.False(t, isFencedTombstone(nil, defaultTombstoneBin))
-	assert.False(t, isFencedTombstone(map[string]any{"tier": "gold"}, defaultTombstoneBin))
-	assert.False(t, isFencedTombstone(map[string]any{defaultTombstoneBin: false}, defaultTombstoneBin))
-	assert.False(t, isFencedTombstone(map[string]any{defaultTombstoneBin: nil}, defaultTombstoneBin))
-	assert.True(t, isFencedTombstone(map[string]any{defaultTombstoneBin: true}, defaultTombstoneBin))
 }
 
 func parseClientYAML(t *testing.T, yaml string) (*clientConfig, error) {
@@ -358,7 +290,7 @@ func TestConnectCancelledContext(t *testing.T) {
 
 func parseBatchYAML(t *testing.T, yaml string) (*as.BatchPolicy, error) {
 	t.Helper()
-	spec := service.NewConfigSpec().Fields(batchPolicyFields()...)
+	spec := service.NewConfigSpec().Fields(batchPolicyFieldsWithRetries(0)...)
 	parsed, err := spec.ParseYAML(yaml, nil)
 	if err != nil {
 		return nil, err
@@ -444,7 +376,6 @@ func TestParseBatchPolicyZeroIsAllNodes(t *testing.T) {
 	p, err := parseBatchYAML(t, "")
 	require.NoError(t, err)
 	assert.Equal(t, 0, p.ConcurrentNodes)
-	assert.Equal(t, 2, p.MaxRetries)
 	assert.True(t, p.RespondAllKeys)
 }
 
@@ -476,22 +407,9 @@ func TestParseCommitLevel(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestParseReplicaPolicy(t *testing.T) {
-	got, err := parseReplicaPolicy("sequence")
-	require.NoError(t, err)
-	assert.Equal(t, as.SEQUENCE, got)
-
-	got, err = parseReplicaPolicy("master")
-	require.NoError(t, err)
-	assert.Equal(t, as.MASTER, got)
-
-	_, err = parseReplicaPolicy("nearest")
-	require.Error(t, err)
-}
-
 func parseKeyYAML(t *testing.T, yaml string) (*keyConfig, error) {
 	t.Helper()
-	spec := service.NewConfigSpec().Fields(keyFields()...)
+	spec := service.NewConfigSpec().Fields(outputKeyFields()...)
 	parsed, err := spec.ParseYAML(yaml, nil)
 	if err != nil {
 		return nil, err

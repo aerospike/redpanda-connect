@@ -348,7 +348,7 @@ func (m *batchMapper) mapMessage(index int) (*pendingOp, error) {
 
 	if m.conf.fenceEnabled && kind != opReplace && kind != opCreateOnly {
 		// UPDATE merges; a prior fenced delete left a tombstone bin that must
-		// be removed or lookup will still treat the record as missing.
+		// be removed or readers will still treat the record as missing.
 		op.setBin(m.conf.tombstoneBin, nil)
 	}
 

@@ -49,32 +49,17 @@ const (
 	maxNamespaceNameLen = 31
 )
 
-// keyFields returns the fields that address an Aerospike record by user key.
-func keyFields(keyExamples ...string) []*service.ConfigField {
-	return addressFields(false, keyExamples...)
-}
-
-// outputKeyFields is keyFields plus an optional digest. The output accepts one
-// of key or digest. Lookup stays on keyFields, so it cannot address a digest.
+// outputKeyFields returns the fields that address an Aerospike record by user
+// key or by digest. Exactly one of the two must be set.
 func outputKeyFields(keyExamples ...string) []*service.ConfigField {
-	return addressFields(true, keyExamples...)
-}
-
-func addressFields(withDigest bool, keyExamples ...string) []*service.ConfigField {
-	keyDesc := "The record primary key."
-	if withDigest {
-		keyDesc = "The record primary key. Set this or `digest`, not both. Aerospike hashes this value into the record digest; to write a digest the producer already has, use `digest`."
-	}
 	keyField := service.NewInterpolatedStringField(fieldKey).
-		Description(keyDesc)
-	if withDigest {
-		keyField = keyField.Optional()
-	}
+		Description("The record primary key. Set this or `digest`, not both. Aerospike hashes this value into the record digest; to write a digest the producer already has, use `digest`.").
+		Optional()
 	for _, ex := range keyExamples {
 		keyField = keyField.Example(ex)
 	}
 
-	fields := []*service.ConfigField{
+	return []*service.ConfigField{
 		service.NewInterpolatedStringField(fieldNamespace).
 			Description("The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime. A resolved value of `null` is rejected, because a missing interpolated field stringifies to that. Use `meta(\"kafka_topic\")` when the topic name is the namespace.").
 			Example("test").
@@ -91,18 +76,13 @@ func addressFields(withDigest bool, keyExamples ...string) []*service.ConfigFiel
 			Example(`${! meta("as_set") }`),
 
 		keyField,
-	}
-	if withDigest {
-		fields = append(fields,
-			service.NewInterpolatedStringField(fieldDigest).
-				Description("The 20-byte record digest as standard Base64, as produced by another Aerospike client. The user key stored with the record is null. Set this or `key`, not both. `key_type` and `key_encoding` apply only to `key`. `namespace` and `set` must be the ones the digest was computed for.\n\nInterpolation always yields a string, so a raw 20-byte digest cannot be told apart from 20 characters of text and is rejected. Encode it in the mapping instead: `${! content().encode(\"base64\") }` for a raw payload, or `${! meta(\"kafka_key\").encode(\"base64\") }` for a raw Kafka key.\n\nThis does not hash the value. `key` with `key_type: bytes` hashes those bytes and addresses a different record.").
-				Optional().
-				Example(`${! json("digest") }`).
-				Example(`${! content().encode("base64") }`).
-				Example(`${! meta("kafka_key").encode("base64") }`),
-		)
-	}
-	return append(fields,
+		service.NewInterpolatedStringField(fieldDigest).
+			Description("The 20-byte record digest as standard Base64, as produced by another Aerospike client. The user key stored with the record is null. Set this or `key`, not both. `key_type` and `key_encoding` apply only to `key`. `namespace` and `set` must be the ones the digest was computed for.\n\nInterpolation always yields a string, so a raw 20-byte digest cannot be told apart from 20 characters of text and is rejected. Encode it in the mapping instead: `${! content().encode(\"base64\") }` for a raw payload, or `${! meta(\"kafka_key\").encode(\"base64\") }` for a raw Kafka key.\n\nThis does not hash the value. `key` with `key_type: bytes` hashes those bytes and addresses a different record.").
+			Optional().
+			Example(`${! json("digest") }`).
+			Example(`${! content().encode("base64") }`).
+			Example(`${! meta("kafka_key").encode("base64") }`),
+
 		service.NewStringEnumField(fieldKeyType, "string", "int", "bytes").
 			Description("How to interpret the resolved `key`. Aerospike addresses records by a digest of the key, and the digest differs between a string `\"123\"` and an integer `123`. This must match whatever else reads or writes these records.").
 			Default("string"),
@@ -111,7 +91,7 @@ func addressFields(withDigest bool, keyExamples ...string) []*service.ConfigFiel
 			Description("How to decode the interpolated `key` when `key_type` is `bytes`. Interpolation always yields a string, so a genuine binary key must be carried as base64 or hex. `utf8` uses the string's raw bytes and only matches other clients that also stored UTF-8.").
 			Default("utf8").
 			Advanced(),
-	)
+	}
 }
 
 // keyConfig is the parsed record addressing configuration.
@@ -124,10 +104,8 @@ type keyConfig struct {
 	KeyEncoding string
 }
 
-// parseKeyConfig reads the fields produced by keyFields or outputKeyFields.
-//
-// Lookup always has a key. The output has exactly one of key and digest; the
-// lookup spec does not declare digest, so Contains reports it absent there.
+// parseKeyConfig reads the fields produced by outputKeyFields. Exactly one of
+// key and digest must be set.
 func parseKeyConfig(conf *service.ParsedConfig) (*keyConfig, error) {
 	k := &keyConfig{}
 
