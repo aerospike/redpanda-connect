@@ -31,20 +31,24 @@ import (
 
 // Configuration field names shared by every Aerospike component.
 const (
-	fieldHosts                = "hosts"
-	fieldClusterName          = "cluster_name"
-	fieldUseServicesAlternate = "use_services_alternate"
-	fieldConnectTimeout       = "connect_timeout"
-	fieldMaxConnsPerNode      = "max_connections_per_node"
-	fieldMinConnsPerNode      = "min_connections_per_node"
-	fieldWarmUp               = "warm_up"
-	fieldMaxErrorRate         = "max_error_rate"
-	fieldErrorRateWindow      = "error_rate_window"
-	fieldCredentials          = "credentials"
-	fieldCredentialsUsername  = "username"
-	fieldCredentialsPassword  = "password"
-	fieldTLS                  = "tls"
-	fieldAuthMode             = "auth_mode"
+	fieldHosts                   = "hosts"
+	fieldClusterName             = "cluster_name"
+	fieldUseServicesAlternate    = "use_services_alternate"
+	fieldConnectTimeout          = "connect_timeout"
+	fieldMaxConnsPerNode         = "max_connections_per_node"
+	fieldMinConnsPerNode         = "min_connections_per_node"
+	fieldWarmUp                  = "warm_up"
+	fieldMaxErrorRate            = "max_error_rate"
+	fieldErrorRateWindow         = "error_rate_window"
+	fieldCredentials             = "credentials"
+	fieldCredentialsUsername     = "username"
+	fieldCredentialsPassword     = "password"
+	fieldCredentialsPasswordFile = "password_file"
+	fieldTLS                     = "tls"
+	fieldCiphers                 = "ciphers"
+	fieldProtocols               = "protocols"
+	fieldRevokeCertificates      = "revoke_certificates"
+	fieldAuthMode                = "auth_mode"
 
 	// defaultServicePort is the Aerospike client service port.
 	defaultServicePort = 3000
@@ -109,9 +113,15 @@ func clientFields() []*service.ConfigField {
 				Description("Username for Aerospike access control.").
 				Default(""),
 			service.NewStringField(fieldCredentialsPassword).
-				Description("Password for Aerospike access control.").
+				Description("Password for Aerospike access control. Set this or `password_file`, not both.").
 				Default("").
 				Secret(),
+			service.NewStringField(fieldCredentialsPasswordFile).
+				Description("File whose first line is the Aerospike password. This is the kafka-inbound `credentials.password-file` path. A trailing newline is not part of the password. Trailing spaces on the first line are kept. Set this or `password`, not both. `pki` ignores this field. A missing file fails startup. The file contents are not logged.").
+				Default("").
+				Example("/var/secrets/aerospike-password").
+				Version("4.114.0").
+				Advanced(),
 		).Description("Credentials for clusters with access control enabled. Aerospike Community Edition has no authentication; leave empty there.").
 			Optional().
 			Advanced(),
@@ -126,6 +136,27 @@ func clientFields() []*service.ConfigField {
 			Advanced(),
 
 		service.NewTLSToggledField(fieldTLS),
+
+		service.NewStringListField(fieldCiphers).
+			Description("TLS 1.2 cipher suites to offer, as IANA names such as `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. This is the kafka-inbound `tls.ciphers` allow-list. Empty leaves the suites selected by `tls`. Names are matched without case, and a name Go does not implement is rejected at startup. A suite Go marks insecure is accepted when it is named, so the list can match a server that still requires it. TLS 1.3 suites cannot be named here. They stay offered unless `protocols` is `TLSv1.2`. Requires `tls.enabled`.").
+			Default([]string{}).
+			Example([]string{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}).
+			Version("4.114.0").
+			Advanced(),
+
+		service.NewStringListField(fieldProtocols).
+			Description("TLS versions to offer. This is the kafka-inbound `tls.protocols` allow-list. `TLSv1.2` does not offer TLS 1.3. `TLSv1.3` does not offer TLS 1.2. Empty, or both names, leaves the versions selected by `tls`: TLS 1.2 and TLS 1.3. Names are matched without case. `ciphers` applies only when TLS 1.2 is offered. Requires `tls.enabled`.").
+			Default([]string{}).
+			Example([]string{"TLSv1.2"}).
+			Version("4.114.0").
+			Advanced(),
+
+		service.NewStringListField(fieldRevokeCertificates).
+			Description("Certificate serial numbers to reject, as decimal integers. This is the kafka-inbound `tls.revoke-certificates` list. The handshake fails when the peer certificate, or another certificate in its chain, has a listed serial. An empty list leaves the CA check as the only certificate check. A serial may be larger than a 64-bit integer. Requires `tls.enabled`.").
+			Default([]string{}).
+			Example([]string{"123123"}).
+			Version("4.114.0").
+			Advanced(),
 	}
 }
 
@@ -215,6 +246,7 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 		return nil, fmt.Errorf("field '%v' must not be negative", fieldErrorRateWindow)
 	}
 
+	var passwordFile string
 	if conf.Contains(fieldCredentials) {
 		cc := conf.Namespace(fieldCredentials)
 		if c.Policy.User, err = cc.FieldString(fieldCredentialsUsername); err != nil {
@@ -223,6 +255,10 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 		if c.Policy.Password, err = cc.FieldString(fieldCredentialsPassword); err != nil {
 			return nil, err
 		}
+		if passwordFile, err = cc.FieldString(fieldCredentialsPasswordFile); err != nil {
+			return nil, err
+		}
+		passwordFile = strings.TrimSpace(passwordFile)
 	}
 
 	mode, err := conf.FieldString(fieldAuthMode)
@@ -239,13 +275,50 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 	default:
 		return nil, fmt.Errorf("field '%v': unknown auth mode %q", fieldAuthMode, mode)
 	}
+	if err := applyPasswordFile(c.Policy, passwordFile); err != nil {
+		return nil, err
+	}
 
 	var tlsConf *tls.Config
 	var tlsEnabled bool
 	if tlsConf, tlsEnabled, err = conf.FieldTLSToggled(fieldTLS); err != nil {
 		return nil, err
 	}
+	cipherNames, err := conf.FieldStringList(fieldCiphers)
+	if err != nil {
+		return nil, err
+	}
+	if len(cipherNames) > 0 && !tlsEnabled {
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldCiphers, fieldTLS)
+	}
+	protocolNames, err := conf.FieldStringList(fieldProtocols)
+	if err != nil {
+		return nil, err
+	}
+	if len(protocolNames) > 0 && !tlsEnabled {
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldProtocols, fieldTLS)
+	}
+	revokedNames, err := conf.FieldStringList(fieldRevokeCertificates)
+	if err != nil {
+		return nil, err
+	}
+	if len(revokedNames) > 0 && !tlsEnabled {
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldRevokeCertificates, fieldTLS)
+	}
 	if tlsEnabled {
+		suites, err := cipherSuiteIDs(cipherNames)
+		if err != nil {
+			return nil, err
+		}
+		if len(suites) > 0 {
+			tlsConf.CipherSuites = suites
+		}
+		if err := applyTLSProtocols(tlsConf, protocolNames); err != nil {
+			return nil, err
+		}
+		if err := applyRevokedCertificates(tlsConf, revokedNames); err != nil {
+			return nil, err
+		}
 		c.Policy.TlsConfig = tlsConf
 	}
 

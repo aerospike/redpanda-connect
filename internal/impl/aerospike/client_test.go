@@ -16,7 +16,12 @@ package aerospike
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -187,6 +192,325 @@ credentials:
 	err := w.Connect(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Password authentication is disabled")
+}
+
+func TestParsePasswordFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aerospike-password")
+	require.NoError(t, os.WriteFile(path, []byte("p@ss w0rd \r\nignored\n"), 0o600))
+
+	t.Run("first line keeps trailing spaces", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+  password_file: `+path+`
+`)
+		require.NoError(t, err)
+		assert.Equal(t, "rpcn", c.Policy.User)
+		assert.Equal(t, "p@ss w0rd ", c.Policy.Password)
+	})
+
+	t.Run("both password and file", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+  password: secret
+  password_file: `+path+`
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not both")
+		assert.NotContains(t, err.Error(), "p@ss")
+	})
+
+	t.Run("username without a password", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "set 'password' or 'password_file'")
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		missing := filepath.Join(dir, "missing")
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+  password_file: `+missing+`
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot read")
+		assert.NotContains(t, err.Error(), "p@ss")
+	})
+
+	t.Run("empty file is an empty password", func(t *testing.T) {
+		empty := filepath.Join(dir, "empty")
+		require.NoError(t, os.WriteFile(empty, []byte("\n"), 0o600))
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+  password_file: `+empty+`
+`)
+		require.NoError(t, err)
+		assert.Empty(t, c.Policy.Password)
+	})
+
+	t.Run("pki ignores the file", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+auth_mode: pki
+credentials:
+  password_file: `+path+`
+`)
+		require.NoError(t, err)
+		assert.Equal(t, as.AuthModePKI, c.Policy.AuthMode)
+		assert.Empty(t, c.Policy.Password)
+	})
+}
+
+func suiteNamed(t *testing.T, suites []*tls.CipherSuite, name string) *tls.CipherSuite {
+	t.Helper()
+	for _, suite := range suites {
+		if suite.Name == name {
+			return suite
+		}
+	}
+	t.Fatalf("cipher suite %s is not in this Go build", name)
+	return nil
+}
+
+func TestParseTLSCiphers(t *testing.T) {
+	secure := suiteNamed(t, tls.CipherSuites(), "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256")
+	insecure := suiteNamed(t, tls.InsecureCipherSuites(), "TLS_RSA_WITH_AES_128_CBC_SHA")
+
+	t.Run("empty leaves the tls default", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+`)
+		require.NoError(t, err)
+		require.NotNil(t, c.Policy.TlsConfig)
+		assert.Contains(t, c.Policy.TlsConfig.CipherSuites, secure.ID)
+		assert.NotContains(t, c.Policy.TlsConfig.CipherSuites, insecure.ID)
+	})
+
+	t.Run("allow-list is case insensitive and drops a repeat", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+ciphers:
+  - `+strings.ToLower(secure.Name)+`
+  - `+secure.Name+`
+  - `+insecure.Name+`
+`)
+		require.NoError(t, err)
+		assert.Equal(t, []uint16{secure.ID, insecure.ID}, c.Policy.TlsConfig.CipherSuites)
+	})
+
+	t.Run("unknown name", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+ciphers: ["NOT_A_CIPHER"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unknown cipher "NOT_A_CIPHER"`)
+	})
+
+	t.Run("tls 1.3 is not configurable", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+ciphers: ["TLS_AES_128_GCM_SHA256"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TLS 1.3")
+	})
+
+	t.Run("requires tls", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+ciphers: ["`+secure.Name+`"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "requires 'tls.enabled'")
+	})
+}
+
+func TestParseTLSProtocols(t *testing.T) {
+	t.Run("empty leaves tls 1.2 and tls 1.3", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+`)
+		require.NoError(t, err)
+		assert.Equal(t, uint16(tls.VersionTLS12), c.Policy.TlsConfig.MinVersion)
+		assert.Zero(t, c.Policy.TlsConfig.MaxVersion)
+	})
+
+	t.Run("tls 1.2 does not offer tls 1.3", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: ["tlsv1.2", "TLSv1.2"]
+`)
+		require.NoError(t, err)
+		assert.Equal(t, uint16(tls.VersionTLS12), c.Policy.TlsConfig.MinVersion)
+		assert.Equal(t, uint16(tls.VersionTLS12), c.Policy.TlsConfig.MaxVersion)
+	})
+
+	t.Run("tls 1.3 does not offer tls 1.2", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: ["TLSv1.3"]
+`)
+		require.NoError(t, err)
+		assert.Equal(t, uint16(tls.VersionTLS13), c.Policy.TlsConfig.MinVersion)
+		assert.Zero(t, c.Policy.TlsConfig.MaxVersion)
+	})
+
+	t.Run("both names leave the default versions", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: ["TLSv1.2", "TLSv1.3"]
+`)
+		require.NoError(t, err)
+		assert.Equal(t, uint16(tls.VersionTLS12), c.Policy.TlsConfig.MinVersion)
+		assert.Zero(t, c.Policy.TlsConfig.MaxVersion)
+	})
+
+	t.Run("unknown protocol", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: ["TLSv1.1"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unknown protocol "TLSv1.1"`)
+	})
+
+	t.Run("empty name", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: [" "]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty protocol name")
+	})
+
+	t.Run("requires tls", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+protocols: ["TLSv1.2"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "requires 'tls.enabled'")
+	})
+}
+
+func TestParseRevokeCertificates(t *testing.T) {
+	t.Run("empty leaves the ca check alone", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+`)
+		require.NoError(t, err)
+		assert.Nil(t, c.Policy.TlsConfig.VerifyPeerCertificate)
+	})
+
+	t.Run("listed serial rejects that certificate", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+revoke_certificates: ["02", "2", "9223372036854775808"]
+`)
+		require.NoError(t, err)
+		require.NotNil(t, c.Policy.TlsConfig.VerifyPeerCertificate)
+		err = c.Policy.TlsConfig.VerifyPeerCertificate(nil, [][]*x509.Certificate{{
+			{SerialNumber: big.NewInt(2)},
+		}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serial 2 is revoked")
+
+		large, ok := new(big.Int).SetString("9223372036854775808", 10)
+		require.True(t, ok)
+		err = c.Policy.TlsConfig.VerifyPeerCertificate(nil, [][]*x509.Certificate{{
+			{SerialNumber: large},
+		}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serial 9223372036854775808 is revoked")
+
+		require.NoError(t, c.Policy.TlsConfig.VerifyPeerCertificate(nil, [][]*x509.Certificate{{
+			{SerialNumber: big.NewInt(99)},
+		}}))
+	})
+
+	t.Run("chain serial is rejected", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+revoke_certificates: ["1"]
+`)
+		require.NoError(t, err)
+		err = c.Policy.TlsConfig.VerifyPeerCertificate(nil, [][]*x509.Certificate{{
+			{SerialNumber: big.NewInt(2)},
+			{SerialNumber: big.NewInt(1)},
+		}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serial 1 is revoked")
+	})
+
+	t.Run("not a decimal serial", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+revoke_certificates: ["0x10"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `serial "0x10" must be a decimal integer`)
+	})
+
+	t.Run("empty serial", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+revoke_certificates: [" "]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty serial number")
+	})
+
+	t.Run("requires tls", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+revoke_certificates: ["2"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "requires 'tls.enabled'")
+	})
 }
 
 func TestParseHost(t *testing.T) {
