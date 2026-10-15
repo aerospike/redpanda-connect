@@ -44,6 +44,8 @@ const (
 	fieldCredentialsUsername  = "username"
 	fieldCredentialsPassword  = "password"
 	fieldTLS                  = "tls"
+	fieldCiphers              = "ciphers"
+	fieldProtocols            = "protocols"
 	fieldAuthMode             = "auth_mode"
 
 	// defaultServicePort is the Aerospike client service port.
@@ -126,6 +128,20 @@ func clientFields() []*service.ConfigField {
 			Advanced(),
 
 		service.NewTLSToggledField(fieldTLS),
+
+		service.NewStringListField(fieldCiphers).
+			Description("TLS 1.2 cipher suites to offer, as IANA names such as `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. This is the kafka-inbound `tls.ciphers` allow-list. Empty leaves the suites selected by `tls`. Names are matched without case, and a name Go does not implement is rejected at startup. A suite Go marks insecure is accepted when it is named, so the list can match a server that still requires it. TLS 1.3 suites cannot be named here. They stay offered unless `protocols` is `TLSv1.2`. Requires `tls.enabled`.").
+			Default([]string{}).
+			Example([]string{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}).
+			Version("4.114.0").
+			Advanced(),
+
+		service.NewStringListField(fieldProtocols).
+			Description("TLS versions to offer. This is the kafka-inbound `tls.protocols` allow-list. `TLSv1.2` does not offer TLS 1.3. `TLSv1.3` does not offer TLS 1.2. Empty, or both names, leaves the versions selected by `tls`: TLS 1.2 and TLS 1.3. Names are matched without case. `ciphers` applies only when TLS 1.2 is offered. Requires `tls.enabled`.").
+			Default([]string{}).
+			Example([]string{"TLSv1.2"}).
+			Version("4.114.0").
+			Advanced(),
 	}
 }
 
@@ -245,7 +261,31 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 	if tlsConf, tlsEnabled, err = conf.FieldTLSToggled(fieldTLS); err != nil {
 		return nil, err
 	}
+	cipherNames, err := conf.FieldStringList(fieldCiphers)
+	if err != nil {
+		return nil, err
+	}
+	if len(cipherNames) > 0 && !tlsEnabled {
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldCiphers, fieldTLS)
+	}
+	protocolNames, err := conf.FieldStringList(fieldProtocols)
+	if err != nil {
+		return nil, err
+	}
+	if len(protocolNames) > 0 && !tlsEnabled {
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldProtocols, fieldTLS)
+	}
 	if tlsEnabled {
+		suites, err := cipherSuiteIDs(cipherNames)
+		if err != nil {
+			return nil, err
+		}
+		if len(suites) > 0 {
+			tlsConf.CipherSuites = suites
+		}
+		if err := applyTLSProtocols(tlsConf, protocolNames); err != nil {
+			return nil, err
+		}
 		c.Policy.TlsConfig = tlsConf
 	}
 
