@@ -46,6 +46,19 @@ output:
         output:
           aerospike:
             hosts: [ "127.0.0.1:3000" ]
+            # ciphers is the TLS 1.2 allow-list. Empty leaves the tls default.
+            # It applies only when tls.enabled is true. TLS 1.3 suites stay on
+            # unless protocols is TLSv1.2.
+            # ciphers:
+            #   - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+            #   - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+            # protocols is the version allow-list. Empty offers TLS 1.2 and TLS 1.3.
+            # protocols:
+            #   - TLSv1.2
+            # revoke_certificates rejects a peer whose serial is listed.
+            # It applies only when tls.enabled is true.
+            # revoke_certificates:
+            #   - "123123"
             cluster_name: redpanda-demo
             namespace: test
             set: users
