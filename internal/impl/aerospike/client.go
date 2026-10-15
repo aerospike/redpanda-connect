@@ -46,6 +46,7 @@ const (
 	fieldTLS                  = "tls"
 	fieldCiphers              = "ciphers"
 	fieldProtocols            = "protocols"
+	fieldRevokeCertificates   = "revoke_certificates"
 	fieldAuthMode             = "auth_mode"
 
 	// defaultServicePort is the Aerospike client service port.
@@ -140,6 +141,13 @@ func clientFields() []*service.ConfigField {
 			Description("TLS versions to offer. This is the kafka-inbound `tls.protocols` allow-list. `TLSv1.2` does not offer TLS 1.3. `TLSv1.3` does not offer TLS 1.2. Empty, or both names, leaves the versions selected by `tls`: TLS 1.2 and TLS 1.3. Names are matched without case. `ciphers` applies only when TLS 1.2 is offered. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"TLSv1.2"}).
+			Version("4.114.0").
+			Advanced(),
+
+		service.NewStringListField(fieldRevokeCertificates).
+			Description("Certificate serial numbers to reject, as decimal integers. This is the kafka-inbound `tls.revoke-certificates` list. The handshake fails when the peer certificate, or another certificate in its chain, has a listed serial. An empty list leaves the CA check as the only certificate check. A serial may be larger than a 64-bit integer. Requires `tls.enabled`.").
+			Default([]string{}).
+			Example([]string{"123123"}).
 			Version("4.114.0").
 			Advanced(),
 	}
@@ -275,6 +283,13 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 	if len(protocolNames) > 0 && !tlsEnabled {
 		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldProtocols, fieldTLS)
 	}
+	revokedNames, err := conf.FieldStringList(fieldRevokeCertificates)
+	if err != nil {
+		return nil, err
+	}
+	if len(revokedNames) > 0 && !tlsEnabled {
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldRevokeCertificates, fieldTLS)
+	}
 	if tlsEnabled {
 		suites, err := cipherSuiteIDs(cipherNames)
 		if err != nil {
@@ -284,6 +299,9 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 			tlsConf.CipherSuites = suites
 		}
 		if err := applyTLSProtocols(tlsConf, protocolNames); err != nil {
+			return nil, err
+		}
+		if err := applyRevokedCertificates(tlsConf, revokedNames); err != nil {
 			return nil, err
 		}
 		c.Policy.TlsConfig = tlsConf
