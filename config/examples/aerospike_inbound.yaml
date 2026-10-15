@@ -59,6 +59,10 @@ output:
             # It applies only when tls.enabled is true.
             # revoke_certificates:
             #   - "123123"
+            # password_file is the first line of a file, instead of password.
+            # credentials:
+            #   username: rpcn
+            #   password_file: /var/secrets/aerospike-password
             cluster_name: redpanda-demo
             namespace: test
             set: users
