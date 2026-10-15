@@ -206,10 +206,43 @@ func (w *aerospikeWriter) planBatch(batch service.MessageBatch) ([]*pendingOp, m
 		ops = append(ops, op)
 	}
 
-	if !w.conf.coalesce {
-		return ops, failures
+	if w.conf.coalesce {
+		ops = coalesceOps(ops)
 	}
-	return coalesceOps(ops), failures
+	return dropBinlessWrites(ops, failures), failures
+}
+
+// dropBinlessWrites rejects a command that would send no bin operations.
+// mapMessage already rejects an all-null replace or replace_only, and fold
+// turns a folded empty replace into a delete, so this is the backstop.
+func dropBinlessWrites(ops []*pendingOp, failures map[int]error) []*pendingOp {
+	kept := make([]*pendingOp, 0, len(ops))
+	for _, op := range ops {
+		if op.kind == opDelete && !op.hasFence {
+			kept = append(kept, op)
+			continue
+		}
+		action := op.kind.recordExistsAction()
+		if op.kind == opDelete {
+			action = as.REPLACE
+		}
+		if len(op.putOps(action)) > 0 {
+			kept = append(kept, op)
+			continue
+		}
+		for _, idx := range op.indexes {
+			failures[idx] = nullReplaceError(op.kind, len(op.indexes) > 1)
+		}
+	}
+	return kept
+}
+
+func nullReplaceError(kind opKind, coalesced bool) error {
+	err := fmt.Errorf("mapping in field '%v' produced only null bin values; %s drops bins it does not name and a null value is not sent, so this write would have no bins", fieldBins, kind)
+	if coalesced {
+		err = fmt.Errorf("%w; these messages were coalesced into one command", err)
+	}
+	return err
 }
 
 func (w *aerospikeWriter) buildRecord(op *pendingOp) as.BatchRecordIfc {
@@ -241,12 +274,27 @@ func (w *aerospikeWriter) buildRecord(op *pendingOp) as.BatchRecordIfc {
 		policy.Generation = op.generation
 	}
 
-	ops := make([]*as.Operation, 0, len(op.binOrder))
-	for _, name := range op.binOrder {
-		ops = append(ops, as.PutOp(as.NewBin(name, op.bins[name])))
-	}
+	return as.NewBatchWrite(&policy, op.key, op.putOps(policy.RecordExistsAction)...)
+}
 
-	return as.NewBatchWrite(&policy, op.key, ops...)
+// putOps is the bin puts buildRecord sends. REPLACE and REPLACE_ONLY already
+// drop bins that are not named. A nil value is a bin delete, and the server
+// rejects that put as a parameter error on those two actions. update_only
+// after a fenced delete is one such write: it clears the tombstone with a nil
+// bin, then fold promotes it to replace. mapMessage rejects a replace or
+// replace_only that this leaves empty. fold turns a folded empty one into a
+// delete, and dropBinlessWrites is the backstop.
+func (p *pendingOp) putOps(action as.RecordExistsAction) []*as.Operation {
+	fullReplace := action == as.REPLACE || action == as.REPLACE_ONLY
+	ops := make([]*as.Operation, 0, len(p.binOrder))
+	for _, name := range p.binOrder {
+		value := p.bins[name]
+		if value == nil && fullReplace {
+			continue
+		}
+		ops = append(ops, as.PutOp(as.NewBin(name, value)))
+	}
+	return ops
 }
 
 func filteredOutCount(rec *as.BatchRecord, op *pendingOp) int {
@@ -273,7 +321,7 @@ func (w *aerospikeWriter) handleRecord(rec *as.BatchRecord, op *pendingOp) error
 			w.log.Debugf("aerospike fenced out %d message(s) for key %v", n, rec.Key)
 		}
 	}
-	err := classifyRecord(rec, op.kind)
+	err := classifyRecord(rec, op)
 	// A result that is in doubt is not ignored. The write may already have been applied.
 	if err != nil && !rec.InDoubt && w.conf.ignores(rec.ResultCode) {
 		w.noteIgnored(rec.ResultCode, rec.Key, err, ignoredMessages(op))

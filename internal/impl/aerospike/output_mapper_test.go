@@ -153,13 +153,14 @@ func TestMapMessageTTLUnitsRejectsInvalid(t *testing.T) {
 
 func TestParseOpKind(t *testing.T) {
 	for in, want := range map[string]opKind{
-		"write":       opWrite,
-		"update":      opWrite,
-		"replace":     opReplace,
-		"create_only": opCreateOnly,
-		"update_only": opUpdateOnly,
-		"delete":      opDelete,
-		"DELETE":      opDelete,
+		"write":        opWrite,
+		"update":       opWrite,
+		"replace":      opReplace,
+		"replace_only": opReplaceOnly,
+		"create_only":  opCreateOnly,
+		"update_only":  opUpdateOnly,
+		"delete":       opDelete,
+		"DELETE":       opDelete,
 	} {
 		got, err := parseOpKind(in)
 		require.NoError(t, err, in)
