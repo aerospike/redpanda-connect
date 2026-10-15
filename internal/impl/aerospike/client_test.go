@@ -16,6 +16,7 @@ package aerospike
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -187,6 +188,79 @@ credentials:
 	err := w.Connect(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Password authentication is disabled")
+}
+
+func suiteNamed(t *testing.T, suites []*tls.CipherSuite, name string) *tls.CipherSuite {
+	t.Helper()
+	for _, suite := range suites {
+		if suite.Name == name {
+			return suite
+		}
+	}
+	t.Fatalf("cipher suite %s is not in this Go build", name)
+	return nil
+}
+
+func TestParseTLSCiphers(t *testing.T) {
+	secure := suiteNamed(t, tls.CipherSuites(), "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256")
+	insecure := suiteNamed(t, tls.InsecureCipherSuites(), "TLS_RSA_WITH_AES_128_CBC_SHA")
+
+	t.Run("empty leaves the tls default", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+`)
+		require.NoError(t, err)
+		require.NotNil(t, c.Policy.TlsConfig)
+		assert.Contains(t, c.Policy.TlsConfig.CipherSuites, secure.ID)
+		assert.NotContains(t, c.Policy.TlsConfig.CipherSuites, insecure.ID)
+	})
+
+	t.Run("allow-list is case insensitive and drops a repeat", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+ciphers:
+  - `+strings.ToLower(secure.Name)+`
+  - `+secure.Name+`
+  - `+insecure.Name+`
+`)
+		require.NoError(t, err)
+		assert.Equal(t, []uint16{secure.ID, insecure.ID}, c.Policy.TlsConfig.CipherSuites)
+	})
+
+	t.Run("unknown name", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+ciphers: ["NOT_A_CIPHER"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unknown cipher "NOT_A_CIPHER"`)
+	})
+
+	t.Run("tls 1.3 is not configurable", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+ciphers: ["TLS_AES_128_GCM_SHA256"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TLS 1.3")
+	})
+
+	t.Run("requires tls", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+ciphers: ["`+secure.Name+`"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "requires 'tls.enabled'")
+	})
 }
 
 func TestParseHost(t *testing.T) {
