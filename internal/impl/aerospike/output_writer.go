@@ -16,7 +16,9 @@ package aerospike
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
 	"github.com/aerospike/aerospike-client-go/v8/types"
@@ -62,6 +64,7 @@ func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (ser
 		conn:        newConnection(parsed.client, mgr.Logger()),
 		log:         mgr.Logger(),
 		filteredOut: mgr.Metrics().NewCounter("aerospike_filtered_out"),
+		ignored:     mgr.Metrics().NewCounter("aerospike_ignored_errors"),
 	}, batchPolicy, maxInFlight, nil
 }
 
@@ -70,6 +73,10 @@ type aerospikeWriter struct {
 	conn        *connection
 	log         *service.Logger
 	filteredOut *service.MetricCounter
+	ignored     *service.MetricCounter
+	// ignoredTotal is the same total passed to aerospike_ignored_errors.
+	// Unit tests read it because they have no metrics registry.
+	ignoredTotal atomic.Int64
 
 	// operate, when set, replaces the live client's BatchOperate. Tests use
 	// this to exercise WriteBatch without a cluster.
@@ -135,9 +142,14 @@ func (w *aerospikeWriter) WriteBatch(ctx context.Context, batch service.MessageB
 			return service.ErrNotConnected
 		}
 
-		// Whether or not the call reported an error, every record carries its
-		// own result code — a batch "failure" usually means some subset of keys
-		// was rejected while the rest committed.
+		// A one-record rejection comes back as the command error and as the
+		// record code. handleRecord counts that record. When every record was
+		// accepted or ignored, a listed command error must not fail the batch.
+		// A record still at NO_RESPONSE keeps its own result. After a write
+		// error the client marks those records in doubt, and errors.As reports
+		// only the first node error, so that code can belong to another node.
+		var asErr *as.AerospikeError
+		commandListed := batchErr != nil && errors.As(batchErr, &asErr) && !asErr.InDoubt && w.conf.ignores(asErr.ResultCode)
 		for i, op := range ops {
 			rec := records[i].BatchRec()
 			if err := w.handleRecord(rec, op); err != nil {
@@ -147,9 +159,7 @@ func (w *aerospikeWriter) WriteBatch(ctx context.Context, batch service.MessageB
 			}
 		}
 
-		if batchErr != nil && len(failures) == 0 {
-			// The command failed before any per-key code was set. Fail the
-			// whole batch rather than silently acknowledging it.
+		if batchErr != nil && len(failures) == 0 && !commandListed {
 			return fmt.Errorf("aerospike batch command failed: %w", batchErr)
 		}
 	}
@@ -183,6 +193,9 @@ func (w *aerospikeWriter) planBatch(batch service.MessageBatch) ([]*pendingOp, m
 	for i := range batch {
 		op, err := mapper.mapMessage(i)
 		if err != nil {
+			if w.acknowledgeIgnoredMapping(err) {
+				continue
+			}
 			failures[i] = err
 			continue
 		}
@@ -236,7 +249,15 @@ func filteredOutCount(rec *as.BatchRecord, op *pendingOp) int {
 	if rec.ResultCode != types.FILTERED_OUT {
 		return 0
 	}
-	return len(op.indexes)
+	return ignoredMessages(op)
+}
+
+func ignoredMessages(op *pendingOp) int {
+	n := len(op.indexes)
+	if n == 0 {
+		n = 1
+	}
+	return n
 }
 
 func (w *aerospikeWriter) handleRecord(rec *as.BatchRecord, op *pendingOp) error {
@@ -248,7 +269,46 @@ func (w *aerospikeWriter) handleRecord(rec *as.BatchRecord, op *pendingOp) error
 			w.log.Debugf("aerospike fenced out %d message(s) for key %v", n, rec.Key)
 		}
 	}
-	return classifyRecord(rec, op.kind)
+	err := classifyRecord(rec, op.kind)
+	// A result that is in doubt is not ignored. The write may already have been applied.
+	if err != nil && !rec.InDoubt && w.conf.ignores(rec.ResultCode) {
+		w.noteIgnored(rec.ResultCode, rec.Key, err, ignoredMessages(op))
+		return nil
+	}
+	return err
+}
+
+// acknowledgeIgnoredMapping reports whether err is the local 15-byte bin-name
+// rejection and code 21 is listed. The message is then acknowledged and is not
+// sent. Any other mapping error stays a failure.
+func (w *aerospikeWriter) acknowledgeIgnoredMapping(err error) bool {
+	var long *longBinNameError
+	if !errors.As(err, &long) || !w.conf.ignores(types.BIN_NAME_TOO_LONG) {
+		return false
+	}
+	w.noteIgnored(types.BIN_NAME_TOO_LONG, long.key, err, 1)
+	return true
+}
+
+// noteIgnored records a dropped message. The counter is separate from
+// aerospike_filtered_out, which counts fencing discards that did reach the server.
+func (w *aerospikeWriter) noteIgnored(code types.ResultCode, key *as.Key, err error, n int) {
+	w.ignoredTotal.Add(int64(n))
+	if w.ignored != nil {
+		w.ignored.Incr(int64(n))
+	}
+	if w.log == nil {
+		return
+	}
+	ns, set, id := "", "", ""
+	if key != nil {
+		ns, set = key.Namespace(), key.SetName()
+		if v := key.Value(); v != nil {
+			id = v.String()
+		}
+	}
+	w.log.Warnf("ignoring aerospike error code %d (%s) namespace=%s set=%s key=%s: %v",
+		code, types.ResultCodeToString(code), ns, set, id, err)
 }
 
 // fenceExpression admits a write only when the record is new, or when the

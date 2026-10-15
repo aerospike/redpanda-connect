@@ -16,8 +16,11 @@ package aerospike
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
+	"github.com/aerospike/aerospike-client-go/v8/types"
 
 	"github.com/redpanda-data/benthos/v4/public/bloblang"
 	"github.com/redpanda-data/benthos/v4/public/service"
@@ -33,6 +36,7 @@ const (
 	fieldDurableDelete        = "durable_delete"
 	fieldCoalesceBatchKeys    = "coalesce_batch_keys"
 	fieldMaxRecordBytes       = "max_record_bytes"
+	fieldIgnoreErrorCodes     = "ignore_error_codes"
 	fieldFencing              = "fencing"
 	fieldFencingEnabled       = "enabled"
 	fieldFencingBin           = "bin"
@@ -48,15 +52,32 @@ const (
 	defaultBatchPeriod = "1s"
 )
 
+// retryableIgnoreLint rejects ignore_error_codes entries that a retry could
+// still write. The same set is enforced in parseOutputConfig.
+func retryableIgnoreLint() string {
+	codes := make([]string, 0, len(retryableResultCodes))
+	for code := range retryableResultCodes {
+		codes = append(codes, strconv.Itoa(int(code)))
+	}
+	// The linter runs this mapping on the list and again on each element.
+	return `root = if this.type() == "number" {
+  if [` + strings.Join(codes, ", ") + `].contains(this) {
+    [ "code %v is retryable or not an error and must not be listed".format(this) ]
+  } else { [] }
+} else { [] }`
+}
+
 func outputSpec() *service.ConfigSpec {
 	spec := service.NewConfigSpec().
 		Beta().
-		Version("4.107.0").
+		Version("4.114.0").
 		Categories("Services").
-		Summary("Writes messages to an Aerospike cluster as records, batched and keyed by an interpolated primary key.").
+		Summary("Writes messages to an Aerospike cluster as records, batched and keyed by an interpolated primary key or digest.").
 		Description(`
-Each message is mapped to a single Aerospike record. The record key is built from the
-` + "`namespace`" + `, ` + "`set`" + ` and ` + "`key`" + ` fields, and the bins are produced by the
+Each message is mapped to a single Aerospike record. The record is addressed by
+` + "`namespace`" + `, ` + "`set`" + `, and either ` + "`key`" + ` or ` + "`digest`" + `.
+` + "`key`" + ` is a user key, which Aerospike hashes. ` + "`digest`" + ` is the 20-byte
+digest itself and the stored user key is null. The bins are produced by the
 ` + "`bins`" + ` Bloblang mapping.
 
 ### Shaping data
@@ -73,9 +94,9 @@ counter, or patch a map in place — those need a modeled operate in application
 Treat ` + "`bins`" + ` as a schema contract the server will not enforce: keep bin names and types
 stable, and cap nested lists and maps in Bloblang (` + "`this.events.slice(0, 100)`" + `). Aerospike
 rewrites the entire record on every update, so the bulk of records should stay in
-single-digit KiB. Sets are a name, not a shard key — do not interpolate an unbounded
-value such as a Kafka topic. Primary-key access is the only read this component offers;
-do not treat lookup as a join.
+single-digit KiB. Sets are a name, not a shard key. Do not interpolate an unbounded
+value. A small fixed list of topic names is fine. Readers address records by primary key, so do
+not rely on the data being queryable as a join.
 
 ### Batching and hot keys
 
@@ -102,6 +123,12 @@ redelivery of stale data to be rejected outright — enable ` + "`fencing`" + `,
 monotonic value alongside the record and guards each write with a filter expression
 evaluated on the server.
 
+A resolved namespace that is not declared on the cluster is rejected with code 20
+(` + "`INVALID_NAMESPACE`" + `) for that message only. The other messages in the batch are still
+written. The rejection does not go away on retry, so with ` + "`auto_replay_nacks`" + ` left on,
+that message is replayed forever and holds the source partition. Wrap this output in
+` + "`output.fallback`" + ` so the rejected message is sent somewhere else instead of being retried.
+
 ### What this output does not do
 
 Writes are whole-bin puts. Atomic increments, list append, and map operations are not
@@ -110,7 +137,7 @@ Aerospike has no client-side change feed.
 ` + service.OutputPerformanceDocs(true, true))
 
 	spec = spec.Fields(clientFields()...)
-	spec = spec.Fields(keyFields(`${! json("user_id") }`, `${! meta("kafka_key") }`)...)
+	spec = spec.Fields(outputKeyFields(`${! json("user_id") }`, `${! meta("kafka_key") }`)...)
 
 	spec = spec.Fields(
 		service.NewInterpolatedStringField(fieldOperation).
@@ -162,7 +189,7 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 			Example("keep"),
 
 		service.NewInterpolatedStringField(fieldGeneration).
-			Description("Expected record generation for a compare-and-set write. When set, the write fails if the stored generation does not match. Empty disables the check. Pair with `aerospike_lookup` `emit_metadata`, which sets `aerospike_generation` on the looked-up message.\n\nA compare-and-set message is never coalesced, even with `coalesce_batch_keys` enabled: the check refers to the specific record that was read, and one command can carry only one expected generation. If several messages in a batch target the same key and any of them carries a generation, each is sent as its own command and the server arbitrates. On `GENERATION_ERROR` the correct recovery is to re-read the record and redo the change, not to retry the same write.").
+			Description("Expected record generation for a compare-and-set write. When set, the write fails if the stored generation does not match. Empty disables the check. The value is the generation the producer read the record at.\n\nA compare-and-set message is never coalesced, even with `coalesce_batch_keys` enabled: the check refers to the specific record that was read, and one command can carry only one expected generation. If several messages in a batch target the same key and any of them carries a generation, each is sent as its own command and the server arbitrates. On `GENERATION_ERROR` the correct recovery is to re-read the record and redo the change, not to retry the same write.").
 			Default("").
 			Example(`${! meta("aerospike_generation") }`).
 			Advanced(),
@@ -187,6 +214,25 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 			Default(0).
 			LintRule(nonNegativeLint).
 			Advanced(),
+
+		service.NewIntListField(fieldIgnoreErrorCodes).
+			Description(`Aerospike result codes to acknowledge instead of failing the message. Empty by default, so a rejection is still a failure and Connect retries it.
+
+A listed code is logged at warning, counted in `+"`aerospike_ignored_errors`"+`, and then acknowledged. That drops the message: the record is not written, the payload is not kept, and `+"`output.fallback`"+` does not see it, because this output reported success. Use this for a permanent reject such as `+"`13`"+` (`+"`RECORD_TOO_BIG`"+`), `+"`20`"+` (`+"`INVALID_NAMESPACE`"+`), `+"`21`"+` (`+"`BIN_NAME_TOO_LONG`"+`), or `+"`22`"+` (`+"`FAIL_FORBIDDEN`"+`), which would otherwise retry forever and hold the source partition.
+
+Code `+"`20`"+` is returned when the resolved namespace is not declared on the cluster. The client marks that record and still writes the other records in the batch. Namespaces cannot be created at runtime. A resolved value of `+"`null`"+` (a missing interpolated field) is rejected while the batch is planned and is not code 20. When the namespace comes from the message, prefer `+"`output.fallback`"+` over listing 20: a typo in that field is published instead of dropped.
+
+Code `+"`21`"+` also covers a top-level bin name longer than 15 bytes. That name is rejected while the batch is planned, so the record is never sent and the server does not return 21. A key inside a map or list is not a bin name and is not code 21.
+
+Code `+"`22`"+` is returned when a positive TTL is written to a namespace with `+"`nsup-period 0`"+`. TTL values `+"`0`"+`, `+"`-1`"+` (`+"`never`"+`), and `+"`-2`"+` (`+"`keep`"+`) do not return 22.
+
+With `+"`coalesce_batch_keys`"+` left on, several messages for one key become one record. A listed code on that record acknowledges every message that folded into it, including messages that would have fit on their own.
+
+A connection failure of the batch is still a failure. So is any mapping error other than that 15-byte name, a result that is in doubt, and any result code left off this list. `+"`max_record_bytes`"+` is a separate local limit and is not code 13. Codes `+"`0`"+` (`+"`OK`"+`), `+"`9`"+` (`+"`TIMEOUT`"+`), `+"`14`"+` (`+"`KEY_BUSY`"+`), and `+"`18`"+` (`+"`DEVICE_OVERLOAD`"+`) are rejected, as are other retryable and connection codes. Listing one would drop a record a retry could still write.`).
+			Default([]int{}).
+			Example([]int{13, 20, 21, 22}).
+			LintRule(retryableIgnoreLint()).
+			Advanced(),
 	)
 	spec = spec.Fields(batchPolicyFieldsWithRetries(0)...)
 	return spec.Fields(
@@ -195,7 +241,7 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 				Description("Enable fencing.").
 				Default(false),
 			service.NewStringField(fieldFencingBin).
-				Description("Bin holding the fence value. Counts toward the 15 character bin name limit. Must match `fence_bin` on `aerospike_lookup`, which strips it from the records it emits.").
+				Description("Bin holding the fence value. Counts toward the 15 character bin name limit. Readers of these records should ignore it, since it is bookkeeping rather than data.").
 				Default(defaultFenceBin),
 			service.NewInterpolatedStringField(fieldFencingValue).
 				Description("An integer that increases monotonically for a given record key. The Kafka offset satisfies this when keys map to partitions consistently, which is the default partitioner's behaviour.").
@@ -203,7 +249,7 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 				Example(`${! meta("kafka_timestamp_ms") }`).
 				Example(`${! json("version") }`),
 			service.NewStringField(fieldFencingTombstoneBin).
-				Description("Bin written on a fenced delete to mark the record as a tombstone. Lookups treat a record carrying this bin as missing. Counts toward the 15 character bin name limit.").
+				Description("Bin written on a fenced delete to mark the record as a tombstone. Readers should treat a record carrying this bin as missing. Counts toward the 15 character bin name limit.").
 				Default(defaultTombstoneBin),
 			service.NewStringField(fieldFencingTombstoneTTL).
 				Description(`Time-to-live for fenced tombstone records. Accepts a duration, or `+"`never`"+`. Defaults to `+"`never`"+` so the fence outlives the data TTL; if the tombstone expires, a stale replay can recreate the record.
@@ -217,8 +263,8 @@ server and acknowledged as successful, giving effectively-once writes without a 
 Those discards increment the `+"`aerospike_filtered_out`"+` counter and are logged at debug.
 
 When fencing is enabled, deletes do not remove the record: they replace it with the fence plus a
-tombstone bin, so a later replay cannot resurrect stale data. `+"`aerospike_lookup`"+` treats that
-tombstone as not found. `+"`create_only`"+` after a fenced delete fails because the tombstone still exists.`).
+tombstone bin, so a later replay cannot resurrect stale data. Readers should treat that tombstone
+as not found. `+"`create_only`"+` after a fenced delete fails because the tombstone still exists.`).
 			Advanced(),
 
 		service.NewBatchPolicyField(fieldBatching).
@@ -252,6 +298,20 @@ output:
 `,
 		).
 		Example(
+			"Write a record by digest",
+			"The producer already has the 20-byte Aerospike digest, carried as a standard Base64 JSON field. The stored user key is null. For a raw 20-byte digest, encode it in the mapping, for example `digest: '${! meta(\"kafka_key\").encode(\"base64\") }'`.",
+			`
+output:
+  aerospike:
+    hosts: [ "localhost:3000" ]
+    namespace: test
+    set: users
+    digest: '${! json("digest") }'
+    bins: 'root = this.without("digest")'
+    operation: replace
+`,
+		).
+		Example(
 			"Effectively-once with offset fencing",
 			"Rejects redelivered or out-of-order messages on the server, so at-least-once delivery cannot regress a record to an older state.",
 			`
@@ -267,6 +327,47 @@ output:
       enabled: true
       bin: _off
       value: '${! meta("kafka_offset") }'
+`,
+		).
+		Example(
+			"Route topics to namespaces and sets",
+			"One cluster, many namespace and set combinations. The topic name can be the namespace, or a switch can send each topic to a fixed namespace and set. A JSON field can choose the namespace. The set is limited to a known list. The test and payments namespaces must already be declared on the server. Each branch is wrapped in output.fallback so a code 20 (INVALID_NAMESPACE) rejection is not replayed forever.",
+			`
+input:
+  redpanda:
+    seed_brokers: [ "localhost:19092" ]
+    topics: [ "test", "payments", "events" ]
+    consumer_group: "aerospike-sink"
+
+output:
+  switch:
+    cases:
+      - check: meta("kafka_topic") == "events"
+        output:
+          fallback:
+            - aerospike:
+                hosts: [ "localhost:3000" ]
+                namespace: '${! json("namespace_name") }'
+                set: '${! if ["clicks", "views"].contains(json("set_name")) { json("set_name") } else { throw("set_name is not allowed") } }'
+                key: '${! json("id") }'
+                bins: 'root = this.without("id", "namespace_name", "set_name")'
+                operation: replace
+            - redpanda:
+                seed_brokers: [ "localhost:19092" ]
+                topic: aerospike-rejects
+      - check: meta("kafka_topic") == "test" || meta("kafka_topic") == "payments"
+        output:
+          fallback:
+            - aerospike:
+                hosts: [ "localhost:3000" ]
+                namespace: '${! meta("kafka_topic") }'
+                set: users
+                key: '${! meta("kafka_key") }'
+                bins: 'root = this'
+                operation: replace
+            - redpanda:
+                seed_brokers: [ "localhost:19092" ]
+                topic: aerospike-rejects
 `,
 		)
 }
@@ -293,6 +394,10 @@ type aerospikeConfig struct {
 	coalesce bool
 
 	maxRecordBytes int
+
+	// ignoreCodes are per-record result codes acknowledged as success. Empty
+	// means every rejection fails the message.
+	ignoreCodes map[int]struct{}
 
 	fenceEnabled bool
 	fenceBin     string
@@ -362,6 +467,21 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 		return nil, fmt.Errorf("field '%v' must not be negative", fieldMaxRecordBytes)
 	}
 
+	codes, err := conf.FieldIntList(fieldIgnoreErrorCodes)
+	if err != nil {
+		return nil, err
+	}
+	if len(codes) > 0 {
+		c.ignoreCodes = make(map[int]struct{}, len(codes))
+		for _, code := range codes {
+			if retryableIgnore(code) {
+				return nil, fmt.Errorf("field '%v': code %d (%s) is retryable or not an error and must not be listed",
+					fieldIgnoreErrorCodes, code, types.ResultCodeToString(types.ResultCode(code)))
+			}
+			c.ignoreCodes[code] = struct{}{}
+		}
+	}
+
 	if conf.Contains(fieldFencing) {
 		fc := conf.Namespace(fieldFencing)
 		if c.fenceEnabled, err = fc.FieldBool(fieldFencingEnabled); err != nil {
@@ -429,4 +549,14 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 	c.deletePolicy.CommitLevel = commit
 
 	return c, nil
+}
+
+// ignores reports whether a per-record result code is configured to be
+// acknowledged. An empty list ignores nothing.
+func (c *aerospikeConfig) ignores(code types.ResultCode) bool {
+	if c == nil || len(c.ignoreCodes) == 0 {
+		return false
+	}
+	_, ok := c.ignoreCodes[int(code)]
+	return ok
 }

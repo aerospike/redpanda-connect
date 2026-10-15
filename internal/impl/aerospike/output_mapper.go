@@ -348,7 +348,7 @@ func (m *batchMapper) mapMessage(index int) (*pendingOp, error) {
 
 	if m.conf.fenceEnabled && kind != opReplace && kind != opCreateOnly {
 		// UPDATE merges; a prior fenced delete left a tombstone bin that must
-		// be removed or lookup will still treat the record as missing.
+		// be removed or readers will still treat the record as missing.
 		op.setBin(m.conf.tombstoneBin, nil)
 	}
 
@@ -455,6 +455,9 @@ func (m *batchMapper) applyBins(op *pendingOp, index int) error {
 
 	for _, name := range names {
 		if err := validateBinName(name); err != nil {
+			if len(name) > maxBinNameLen {
+				return &longBinNameError{key: op.key, name: name, n: len(name)}
+			}
 			return fmt.Errorf("%w; rename it in the '%v' mapping", err, fieldBins)
 		}
 		value, err := toAerospike(obj[name], m.conf.coerceInts)

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package aerospike implements an Aerospike output and lookup processor.
+// Package aerospike implements an Aerospike output.
 package aerospike
 
 import (

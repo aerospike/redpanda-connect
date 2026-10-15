@@ -17,6 +17,7 @@ package aerospike
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -33,6 +34,7 @@ import (
 	"time"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
+	"github.com/aerospike/aerospike-client-go/v8/types"
 	"github.com/moby/moby/api/types/container"
 	mobynet "github.com/moby/moby/api/types/network"
 	"github.com/stretchr/testify/assert"
@@ -48,7 +50,7 @@ const (
 	aerospikeImage         = "aerospike/aerospike-server:8.2"
 	integrationNamespace   = "test"
 	integrationOutputSet   = "rpa_e2e"
-	integrationLookupSet   = "rpa_lookup"
+	integrationDigestSet   = "rpa_digest"
 	aerospikeContainerPort = "3000/tcp"
 )
 
@@ -254,42 +256,6 @@ func msg(t *testing.T, body string) *service.Message {
 	return service.NewMessage([]byte(body))
 }
 
-func lookupSetup(t *testing.T, extraYAML string) (*lookupProcessor, *as.Client) {
-	t.Helper()
-	hosts := integrationHost(t)
-
-	yaml := `
-hosts: [ "` + hosts + `" ]
-namespace: ` + integrationNamespace + `
-set: ` + integrationLookupSet + `
-key: '${! json("user_id") }'
-` + extraYAML
-
-	p := newTestProcessor(t, yaml)
-	t.Cleanup(func() { _ = p.Close(context.Background()) })
-
-	client, err := as.NewClientWithPolicyAndHost(p.conf.client.Policy, p.conf.client.Hosts...)
-	require.NoError(t, err)
-	t.Cleanup(client.Close)
-
-	require.NoError(t, client.Truncate(nil, integrationNamespace, integrationLookupSet, nil))
-	return p, client
-}
-
-func seed(t *testing.T, client *as.Client, id string, bins as.BinMap) {
-	t.Helper()
-	key, err := as.NewKey(integrationNamespace, integrationLookupSet, id)
-	require.NoError(t, err)
-	require.NoError(t, client.Put(nil, key, bins))
-}
-
-func structured(t *testing.T, m *service.Message) any {
-	t.Helper()
-	v, err := m.AsStructured()
-	require.NoError(t, err)
-	return v
-}
-
 func TestIntegrationWriteAndRead(t *testing.T) {
 	w, client := outputSetup(t, "")
 
@@ -308,6 +274,230 @@ func TestIntegrationWriteAndRead(t *testing.T) {
 	// The key field addresses the record and must not be stored again as a bin.
 	assert.NotContains(t, rec.Bins, "id")
 	assert.Len(t, rec.Bins, 4)
+}
+
+// digestTestWriters returns a writer addressing records by digest and one
+// addressing them by user key, both on the digest test set with send_key on.
+func digestTestWriters(t *testing.T) (byDigest, byKey *aerospikeWriter, client *as.Client) {
+	t.Helper()
+	hosts := integrationHost(t)
+	common := `
+hosts: [ "` + hosts + `" ]
+namespace: ` + integrationNamespace + `
+set: ` + integrationDigestSet + `
+send_key: true
+`
+	byDigest = newTestWriter(t, common+`
+digest: '${! json("digest") }'
+bins: 'root = this.without("digest")'
+`)
+	byKey = newTestWriter(t, common+`
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+`)
+	for _, w := range []*aerospikeWriter{byDigest, byKey} {
+		require.NoError(t, w.Connect(t.Context()))
+		t.Cleanup(func() { _ = w.Close(context.Background()) })
+	}
+
+	client, err := as.NewClientWithPolicyAndHost(byDigest.conf.client.Policy, byDigest.conf.client.Hosts...)
+	require.NoError(t, err)
+	t.Cleanup(client.Close)
+	return byDigest, byKey, client
+}
+
+// storedUserKeys scans the digest test set and returns the user key the server
+// stored for each of the given digests, or nil when none is stored. Get cannot
+// show this, because it returns the key it was called with.
+func storedUserKeys(t *testing.T, client *as.Client, digests ...[]byte) map[string]any {
+	t.Helper()
+	want := map[string]bool{}
+	for _, d := range digests {
+		want[string(d)] = true
+	}
+	rs, asErr := client.ScanAll(nil, integrationNamespace, integrationDigestSet)
+	require.NoError(t, asErr)
+	stored := map[string]any{}
+	for res := range rs.Results() {
+		require.NoError(t, res.Err)
+		d := string(res.Record.Key.Digest())
+		if !want[d] {
+			continue
+		}
+		var userKey any
+		if v := res.Record.Key.Value(); v != nil {
+			userKey = v.GetObject()
+		}
+		stored[d] = userKey
+	}
+	return stored
+}
+
+// TestIntegrationWriteByDigest writes a record whose address is a producer-supplied
+// digest. Reading it back with that digest finds the bins; addressing the Base64
+// text as a user key does not, because that would hash the text instead of using
+// the digest. With send_key on, the server stores no user key for the digest
+// record, while a record written by key in the same set has one.
+func TestIntegrationWriteByDigest(t *testing.T) {
+	byDigest, byKey, client := digestTestWriters(t)
+	raw := bytes.Repeat([]byte{0x11}, digestLen)
+	b64 := base64.StdEncoding.EncodeToString(raw)
+
+	require.NoError(t, byDigest.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"digest":"`+b64+`","name":"Ada"}`),
+	}))
+	require.NoError(t, byKey.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"grace","name":"Grace"}`),
+	}))
+
+	key, err := as.NewKeyWithDigest(integrationNamespace, integrationDigestSet, nil, raw)
+	require.NoError(t, err)
+	rec, asErr := client.Get(nil, key)
+	require.NoError(t, asErr)
+	assert.Equal(t, "Ada", rec.Bins["name"])
+	assert.NotContains(t, rec.Bins, "digest")
+
+	hashed, err := as.NewKey(integrationNamespace, integrationDigestSet, b64)
+	require.NoError(t, err)
+	_, asErr = client.Get(nil, hashed)
+	require.Error(t, asErr)
+	assert.True(t, asErr.Matches(types.KEY_NOT_FOUND_ERROR))
+
+	grace, err := as.NewKey(integrationNamespace, integrationDigestSet, "grace")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		string(raw):            nil,
+		string(grace.Digest()): "grace",
+	}, storedUserKeys(t, client, raw, grace.Digest()))
+}
+
+// TestIntegrationUpdateByKeyDigest writes a record by user key, then updates it
+// by that key's digest. The update changes the bins and keeps the user key the
+// first write stored, because a write by digest sends no user key.
+func TestIntegrationUpdateByKeyDigest(t *testing.T) {
+	byDigest, byKey, client := digestTestWriters(t)
+
+	require.NoError(t, byKey.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"ingest-1","name":"Ada","city":"London"}`),
+	}))
+
+	key, err := as.NewKey(integrationNamespace, integrationDigestSet, "ingest-1")
+	require.NoError(t, err)
+	b64 := base64.StdEncoding.EncodeToString(key.Digest())
+	require.NoError(t, byDigest.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"digest":"`+b64+`","name":"Grace"}`),
+	}))
+
+	rec, asErr := client.Get(nil, key)
+	require.NoError(t, asErr)
+	assert.Equal(t, "Grace", rec.Bins["name"])
+	assert.Equal(t, "London", rec.Bins["city"])
+	assert.Equal(t, map[string]any{string(key.Digest()): "ingest-1"}, storedUserKeys(t, client, key.Digest()))
+}
+
+// TestIntegrationTopicRoutesToSet writes one batch to two sets under one user
+// key. The set name is the Kafka topic, which is how a fixed topic list shares
+// one namespace. The coalescing key includes the set, so the two messages stay
+// two records.
+func TestIntegrationTopicRoutesToSet(t *testing.T) {
+	w, client := outputSetup(t, `
+set: '${! meta("kafka_topic") }'
+`)
+	for _, set := range []string{"route_users", "route_orders"} {
+		require.NoError(t, client.Truncate(nil, integrationNamespace, set, nil))
+	}
+
+	const id = "u-42"
+	users := msg(t, `{"id":"`+id+`","email":"a@b.com"}`)
+	users.MetaSet("kafka_topic", "route_users")
+	orders := msg(t, `{"id":"`+id+`","sku":"book"}`)
+	orders.MetaSet("kafka_topic", "route_orders")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{users, orders}))
+
+	read := func(set string) *as.Record {
+		t.Helper()
+		key, err := as.NewKey(integrationNamespace, set, id)
+		require.NoError(t, err)
+		rec, asErr := client.Get(nil, key)
+		require.NoError(t, asErr)
+		return rec
+	}
+
+	usersRec := read("route_users")
+	ordersRec := read("route_orders")
+	assert.Equal(t, "a@b.com", usersRec.Bins["email"])
+	assert.NotContains(t, usersRec.Bins, "sku")
+	assert.Equal(t, "book", ordersRec.Bins["sku"])
+	assert.NotContains(t, ordersRec.Bins, "email")
+	assert.Nil(t, outputRead(t, client, id), "the default set must not receive a routed write")
+}
+
+// TestIntegrationJSONFieldRoutesNamespaceAndSet writes one batch to two
+// declared namespaces. The same id and set stay two records because the
+// coalescing key includes the namespace.
+func TestIntegrationJSONFieldRoutesNamespaceAndSet(t *testing.T) {
+	w, client := outputSetup(t, `
+namespace: '${! json("namespace_name") }'
+set: '${! json("set_name") }'
+bins: 'root = this.without("id", "namespace_name", "set_name")'
+`)
+	const set = "route_clicks"
+	const id = "e-1"
+	for _, namespace := range []string{integrationNamespace, noNSUPNamespace} {
+		require.NoError(t, client.Truncate(nil, namespace, set, nil))
+	}
+
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"`+id+`","namespace_name":"`+integrationNamespace+`","set_name":"`+set+`","n":1}`),
+		msg(t, `{"id":"`+id+`","namespace_name":"`+noNSUPNamespace+`","set_name":"`+set+`","n":2}`),
+	}))
+
+	read := func(namespace string) *as.Record {
+		t.Helper()
+		key, err := as.NewKey(namespace, set, id)
+		require.NoError(t, err)
+		rec, asErr := client.Get(nil, key)
+		require.NoError(t, asErr)
+		return rec
+	}
+
+	testRec := read(integrationNamespace)
+	nosupRec := read(noNSUPNamespace)
+	assert.Equal(t, 1, testRec.Bins["n"])
+	assert.Equal(t, 2, nosupRec.Bins["n"])
+	assert.NotContains(t, testRec.Bins, "namespace_name")
+	assert.NotContains(t, testRec.Bins, "set_name")
+	assert.NotContains(t, nosupRec.Bins, "namespace_name")
+	assert.NotContains(t, nosupRec.Bins, "set_name")
+	assert.Nil(t, outputRead(t, client, id), "the default set must not receive a routed write")
+}
+
+// TestIntegrationInvalidNamespaceFailsOneMessage writes one batch at a declared
+// namespace and a name that is not declared. Code 20 fails only the bad
+// message. The good record is stored. With auto_replay_nacks on, the failed
+// message is replayed forever, which is why the routing example wraps that
+// branch in output.fallback.
+func TestIntegrationInvalidNamespaceFailsOneMessage(t *testing.T) {
+	w, client := outputSetup(t, `
+namespace: '${! json("namespace_name") }'
+`)
+
+	batch := service.MessageBatch{
+		msg(t, `{"id":"ns20-bad","namespace_name":"not_a_namespace","v":1}`),
+		msg(t, `{"id":"ns20-ok","namespace_name":"`+integrationNamespace+`","v":1}`),
+	}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+
+	var batchErr *service.BatchError
+	require.ErrorAs(t, err, &batchErr)
+	assert.Equal(t, 1, batchErr.IndexedErrors())
+	msgErr := firstIndexedError(t, indexer, err)
+	assert.Contains(t, msgErr.Error(), "does not exist")
+	assert.Contains(t, msgErr.Error(), "code 20")
+	assert.NotNil(t, outputRead(t, client, "ns20-ok"))
+	assert.Nil(t, outputRead(t, client, "ns20-bad"))
 }
 
 // TestIntegrationCoalescing proves the merge rules against a real server: three
@@ -447,6 +637,28 @@ bins: 'root = this'
 	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{tombstone}))
 }
 
+func TestIntegrationTombstoneDisabledPreservesRecord(t *testing.T) {
+	w, client := outputSetup(t, `
+key: '${! meta("k") }'
+tombstone_as_delete: false
+bins: 'root = if content().length() == 0 { {"touch": true} } else { this }'
+`)
+
+	create := msg(t, `{"v":1}`)
+	create.MetaSet("k", "td1")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{create}))
+	require.NotNil(t, outputRead(t, client, "td1"))
+
+	empty := msg(t, ``)
+	empty.MetaSet("k", "td1")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{empty}))
+
+	rec := outputRead(t, client, "td1")
+	require.NotNil(t, rec, "an empty payload must not delete when tombstone handling is off")
+	assert.Equal(t, 1, rec.Bins["v"])
+	assert.Equal(t, true, rec.Bins["touch"])
+}
+
 func TestIntegrationFencing(t *testing.T) {
 	w, client := outputSetup(t, `
 fencing:
@@ -553,6 +765,25 @@ func TestIntegrationTTLFromJSON(t *testing.T) {
 			assert.InDelta(t, tc.want, rec.Expiration, 60)
 		})
 	}
+}
+
+// TestIntegrationTTLKeepPreservesVoidTime updates a record with ttl keep.
+// The void-time from the first write must stay; a fresh TTL would replace it.
+func TestIntegrationTTLKeepPreservesVoidTime(t *testing.T) {
+	w, client := outputSetup(t, "ttl: '${! json(\"ttl\") }'\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"tk1","v":1,"ttl":"24H"}`)}))
+	first := outputRead(t, client, "tk1")
+	require.NotNil(t, first)
+	assert.InDelta(t, 86400, first.Expiration, 60)
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{msg(t, `{"id":"tk1","v":2,"ttl":"keep"}`)}))
+	second := outputRead(t, client, "tk1")
+	require.NotNil(t, second)
+	assert.Equal(t, 2, second.Bins["v"])
+	assert.InDelta(t, first.Expiration, second.Expiration, 5)
 }
 
 func TestIntegrationTTLRejectsInvalidJSON(t *testing.T) {
@@ -838,6 +1069,21 @@ func TestIntegrationCreateOnlyFailsWhenExists(t *testing.T) {
 	assert.Equal(t, 1, rec.Bins["a"], "the failed create_only must not overwrite the record")
 }
 
+func TestIntegrationUpdateOnlyKeepsUntouchedBins(t *testing.T) {
+	w, client := outputSetup(t, "operation: '${! meta(\"op\") }'\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "write", `{"id":"uo2","a":1,"b":2}`)}))
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "update_only", `{"id":"uo2","a":9}`)}))
+
+	rec := outputRead(t, client, "uo2")
+	require.NotNil(t, rec)
+	assert.Equal(t, 9, rec.Bins["a"])
+	assert.Equal(t, 2, rec.Bins["b"], "update_only must leave bins the message did not name")
+}
+
 func TestIntegrationUpdateOnlyFailsWhenMissing(t *testing.T) {
 	w, client := outputSetup(t, "operation: update_only\n")
 
@@ -872,6 +1118,80 @@ func TestIntegrationPartialFailure(t *testing.T) {
 	assert.NotNil(t, outputRead(t, client, "p1"))
 	assert.Nil(t, outputRead(t, client, "p2"))
 	assert.NotNil(t, outputRead(t, client, "p3"))
+}
+
+// Listing 13 acknowledges a record the server rejects as too big. The oversized
+// record is not stored, and the other record in the batch is.
+func TestIntegrationIgnoreRecordTooBig(t *testing.T) {
+	w, client := outputSetup(t, "ignore_error_codes: [13]\n")
+
+	// Aerospike 8 rejects a record above the namespace max-record-size, which
+	// defaults to 1MiB. The bin overhead puts this payload over that limit.
+	oversized := strings.Repeat("x", 1100*1024)
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"too-big","blob":"`+oversized+`"}`),
+		msg(t, `{"id":"kept","v":1}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), w.ignoredTotal.Load())
+	assert.Nil(t, outputRead(t, client, "too-big"))
+	assert.NotNil(t, outputRead(t, client, "kept"))
+}
+
+// Listing 21 acknowledges the local 15-byte rejection. The long-name record is
+// still not stored, and the other records in the batch are.
+func TestIntegrationIgnoreLongBinName(t *testing.T) {
+	w, client := outputSetup(t, "ignore_error_codes: [21]\n")
+
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"p1","ok":1}`),
+		msg(t, `{"id":"p2","this_bin_name_is_much_too_long":1}`),
+		msg(t, `{"id":"p3","ok":1}`),
+	})
+	require.NoError(t, err)
+
+	assert.NotNil(t, outputRead(t, client, "p1"))
+	assert.Nil(t, outputRead(t, client, "p2"))
+	assert.NotNil(t, outputRead(t, client, "p3"))
+}
+
+// Listing 20 acknowledges a namespace the cluster does not have. The client
+// marks that record and still writes the rest of the batch.
+func TestIntegrationIgnoreInvalidNamespace(t *testing.T) {
+	w, client := outputSetup(t, `
+namespace: '${! json("namespace_name") }'
+ignore_error_codes: [20]
+`)
+
+	err := w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"ns20-bad","namespace_name":"not_a_namespace","v":1}`),
+		msg(t, `{"id":"ns20-ok","namespace_name":"`+integrationNamespace+`","v":1}`),
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, outputRead(t, client, "ns20-ok"))
+	assert.Nil(t, outputRead(t, client, "ns20-bad"))
+}
+
+// An unlisted 20 fails only that message. The record aimed at a real namespace
+// in the same batch is stored.
+func TestIntegrationInvalidNamespaceStillFailsWhenNotListed(t *testing.T) {
+	w, client := outputSetup(t, `
+namespace: '${! json("namespace_name") }'
+`)
+
+	batch := service.MessageBatch{
+		msg(t, `{"id":"ns20b-bad","namespace_name":"not_a_namespace","v":1}`),
+		msg(t, `{"id":"ns20b-ok","namespace_name":"`+integrationNamespace+`","v":1}`),
+	}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	var batchErr *service.BatchError
+	require.ErrorAs(t, err, &batchErr)
+	assert.Equal(t, 1, batchErr.IndexedErrors())
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "does not exist")
+	assert.NotNil(t, outputRead(t, client, "ns20b-ok"))
+	assert.Nil(t, outputRead(t, client, "ns20b-bad"))
 }
 
 // firstIndexedError returns the per-message error a batch failure carried, so a
@@ -994,174 +1314,4 @@ func TestIntegrationUnlimitedTotalTimeout(t *testing.T) {
 
 	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{msg(t, `{"id":"t2","v":"ok"}`)}))
 	assert.Equal(t, "ok", outputRead(t, client, "t2").Bins["v"])
-}
-
-func TestIntegrationLookupEnriches(t *testing.T) {
-	p, client := lookupSetup(t, "")
-
-	seed(t, client, "u1", as.BinMap{"tier": "gold", "ltv": 4200, "country": "GB"})
-
-	batch := service.MessageBatch{service.NewMessage([]byte(`{"user_id":"u1","evt":"click"}`))}
-	out, err := p.ProcessBatch(t.Context(), batch)
-	require.NoError(t, err)
-	require.Len(t, out, 1)
-	require.Len(t, out[0], 1)
-
-	assert.Equal(t, map[string]any{
-		"tier": "gold", "ltv": 4200, "country": "GB",
-	}, structured(t, out[0][0]))
-
-	assert.Equal(t, map[string]any{"user_id": "u1", "evt": "click"}, structured(t, batch[0]))
-}
-
-// Fencing is invisible to the read side: a record written with a fence must
-// enrich a message with its data and nothing else.
-func TestIntegrationLookupHidesFencingBins(t *testing.T) {
-	p, client := lookupSetup(t, "fence_bin: _off\n")
-
-	seed(t, client, "fu1", as.BinMap{"tier": "gold", "_off": 42})
-
-	out, err := p.ProcessBatch(t.Context(),
-		service.MessageBatch{service.NewMessage([]byte(`{"user_id":"fu1"}`))})
-	require.NoError(t, err)
-	require.Len(t, out, 1)
-
-	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][0]))
-}
-
-func TestIntegrationSelectedBinsOnly(t *testing.T) {
-	p, client := lookupSetup(t, "bins: [ tier ]\n")
-
-	seed(t, client, "u1", as.BinMap{"tier": "gold", "ltv": 4200})
-
-	out, err := p.ProcessBatch(t.Context(),
-		service.MessageBatch{service.NewMessage([]byte(`{"user_id":"u1"}`))})
-	require.NoError(t, err)
-
-	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][0]))
-}
-
-func TestIntegrationDeduplicatedFanOut(t *testing.T) {
-	p, client := lookupSetup(t, "")
-
-	seed(t, client, "u1", as.BinMap{"tier": "gold"})
-	seed(t, client, "u2", as.BinMap{"tier": "silver"})
-
-	batch := service.MessageBatch{
-		service.NewMessage([]byte(`{"user_id":"u1","evt":1}`)),
-		service.NewMessage([]byte(`{"user_id":"u2","evt":2}`)),
-		service.NewMessage([]byte(`{"user_id":"u1","evt":3}`)),
-	}
-
-	out, err := p.ProcessBatch(t.Context(), batch)
-	require.NoError(t, err)
-	require.Len(t, out[0], 3)
-
-	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][0]))
-	assert.Equal(t, map[string]any{"tier": "silver"}, structured(t, out[0][1]))
-	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][2]))
-}
-
-func TestIntegrationNestedCDTsBecomeJSON(t *testing.T) {
-	p, client := lookupSetup(t, "")
-
-	seed(t, client, "u1", as.BinMap{
-		"prefs": map[string]any{"theme": "dark", "n": 3},
-		"tags":  []any{"a", "b"},
-	})
-
-	out, err := p.ProcessBatch(t.Context(),
-		service.MessageBatch{service.NewMessage([]byte(`{"user_id":"u1"}`))})
-	require.NoError(t, err)
-
-	assert.Equal(t, map[string]any{
-		"prefs": map[string]any{"theme": "dark", "n": 3},
-		"tags":  []any{"a", "b"},
-	}, structured(t, out[0][0]))
-
-	_, err = out[0][0].AsBytes()
-	require.NoError(t, err)
-}
-
-func TestIntegrationNotFoundNull(t *testing.T) {
-	p, _ := lookupSetup(t, "")
-
-	out, err := p.ProcessBatch(t.Context(),
-		service.MessageBatch{service.NewMessage([]byte(`{"user_id":"missing"}`))})
-	require.NoError(t, err)
-	require.Len(t, out[0], 1)
-
-	assert.Nil(t, structured(t, out[0][0]))
-	assert.NoError(t, out[0][0].GetError())
-}
-
-func TestIntegrationNotFoundDrop(t *testing.T) {
-	p, client := lookupSetup(t, "not_found: drop\n")
-
-	seed(t, client, "u1", as.BinMap{"tier": "gold"})
-
-	batch := service.MessageBatch{
-		service.NewMessage([]byte(`{"user_id":"u1"}`)),
-		service.NewMessage([]byte(`{"user_id":"missing"}`)),
-	}
-
-	out, err := p.ProcessBatch(t.Context(), batch)
-	require.NoError(t, err)
-	require.Len(t, out, 1)
-	require.Len(t, out[0], 1, "the unmatched message should be dropped")
-	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][0]))
-}
-
-func TestIntegrationNotFoundError(t *testing.T) {
-	p, _ := lookupSetup(t, "not_found: error\n")
-
-	out, err := p.ProcessBatch(t.Context(),
-		service.MessageBatch{service.NewMessage([]byte(`{"user_id":"missing"}`))})
-	require.NoError(t, err)
-
-	require.Error(t, out[0][0].GetError())
-}
-
-func TestIntegrationEmitsMetadata(t *testing.T) {
-	p, client := lookupSetup(t, "emit_metadata: true\n")
-
-	key, err := as.NewKey(integrationNamespace, integrationLookupSet, "u1")
-	require.NoError(t, err)
-	wp := as.NewWritePolicy(0, 3600)
-	require.NoError(t, client.Put(wp, key, as.BinMap{"tier": "gold"}))
-
-	out, procErr := p.ProcessBatch(t.Context(),
-		service.MessageBatch{service.NewMessage([]byte(`{"user_id":"u1"}`))})
-	require.NoError(t, procErr)
-
-	gen, ok := out[0][0].MetaGet(metaGeneration)
-	require.True(t, ok)
-	assert.Equal(t, "1", gen)
-
-	// The metadata is documented as feeding the output's generation and ttl
-	// fields, so both have to come back in a form those fields accept.
-	ttl, ok := out[0][0].MetaGet(metaTTL)
-	require.True(t, ok)
-	parsed, ttlErr := parseTTL(ttl)
-	require.NoError(t, ttlErr)
-	assert.InDelta(t, 3600, parsed, 60)
-}
-
-func TestIntegrationKeyFailureIsolated(t *testing.T) {
-	p, client := lookupSetup(t, "")
-
-	seed(t, client, "u1", as.BinMap{"tier": "gold"})
-
-	batch := service.MessageBatch{
-		service.NewMessage([]byte(`{"user_id":"u1"}`)),
-		service.NewMessage([]byte(`{"nope":true}`)),
-	}
-
-	out, err := p.ProcessBatch(t.Context(), batch)
-	require.NoError(t, err)
-	require.Len(t, out[0], 2)
-
-	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][0]))
-	require.Error(t, out[0][1].GetError())
-	assert.Contains(t, out[0][1].GetError().Error(), "not a usable record key")
 }

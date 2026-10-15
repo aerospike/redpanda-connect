@@ -32,8 +32,13 @@ const (
 	fieldNamespace   = "namespace"
 	fieldSet         = "set"
 	fieldKey         = "key"
+	fieldDigest      = "digest"
 	fieldKeyType     = "key_type"
 	fieldKeyEncoding = "key_encoding"
+
+	// digestLen is the RIPEMD-160 length Aerospike uses to address a record.
+	// The client rejects any other length.
+	digestLen = 20
 
 	// maxSetNameLen is the server limit on set names. Sets are also capped per
 	// namespace (1024 on older servers, 32767 on 7+) and cannot be dropped
@@ -44,27 +49,39 @@ const (
 	maxNamespaceNameLen = 31
 )
 
-// keyFields returns the fields that address an Aerospike record.
-func keyFields(keyExamples ...string) []*service.ConfigField {
+// outputKeyFields returns the fields that address an Aerospike record by user
+// key or by digest. Exactly one of the two must be set.
+func outputKeyFields(keyExamples ...string) []*service.ConfigField {
 	keyField := service.NewInterpolatedStringField(fieldKey).
-		Description("The record primary key.")
+		Description("The record primary key. Set this or `digest`, not both. Aerospike hashes this value into the record digest; to write a digest the producer already has, use `digest`.").
+		Optional()
 	for _, ex := range keyExamples {
 		keyField = keyField.Example(ex)
 	}
 
 	return []*service.ConfigField{
 		service.NewInterpolatedStringField(fieldNamespace).
-			Description("The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime. A resolved value of `null` is rejected, because a missing interpolated field stringifies to that.").
+			Description("The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime. A resolved value of `null` is rejected, because a missing interpolated field stringifies to that. Use `meta(\"kafka_topic\")` when the topic name is the namespace.").
 			Example("test").
+			Example(`${! meta("kafka_topic") }`).
+			Example(`${! json("namespace_name") }`).
 			Example(`${! meta("as_namespace") }`),
 
 		service.NewInterpolatedStringField(fieldSet).
-			Description("The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value such as a Kafka topic name. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.").
+			Description("The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value. A small fixed list, such as the topics this pipeline consumes, is fine. A payload field is only safe when the mapping throws for anything outside that list, so a bad value fails before a write can create a set. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.").
 			Default("").
 			Example("users").
+			Example(`${! meta("kafka_topic") }`).
+			Example(`${! if ["clicks", "views"].contains(json("set_name")) { json("set_name") } else { throw("set_name is not allowed") } }`).
 			Example(`${! meta("as_set") }`),
 
 		keyField,
+		service.NewInterpolatedStringField(fieldDigest).
+			Description("The 20-byte record digest as standard Base64, as produced by another Aerospike client. The user key stored with the record is null. Set this or `key`, not both. `key_type` and `key_encoding` apply only to `key`. `namespace` and `set` must be the ones the digest was computed for.\n\nInterpolation always yields a string, so a raw 20-byte digest cannot be told apart from 20 characters of text and is rejected. Encode it in the mapping instead: `${! content().encode(\"base64\") }` for a raw payload, or `${! meta(\"kafka_key\").encode(\"base64\") }` for a raw Kafka key.\n\nThis does not hash the value. `key` with `key_type: bytes` hashes those bytes and addresses a different record.").
+			Optional().
+			Example(`${! json("digest") }`).
+			Example(`${! content().encode("base64") }`).
+			Example(`${! meta("kafka_key").encode("base64") }`),
 
 		service.NewStringEnumField(fieldKeyType, "string", "int", "bytes").
 			Description("How to interpret the resolved `key`. Aerospike addresses records by a digest of the key, and the digest differs between a string `\"123\"` and an integer `123`. This must match whatever else reads or writes these records.").
@@ -82,11 +99,13 @@ type keyConfig struct {
 	Namespace   *service.InterpolatedString
 	Set         *service.InterpolatedString
 	Key         *service.InterpolatedString
+	Digest      *service.InterpolatedString
 	KeyType     string
 	KeyEncoding string
 }
 
-// parseKeyConfig reads the fields produced by keyFields.
+// parseKeyConfig reads the fields produced by outputKeyFields. Exactly one of
+// key and digest must be set.
 func parseKeyConfig(conf *service.ParsedConfig) (*keyConfig, error) {
 	k := &keyConfig{}
 
@@ -97,14 +116,37 @@ func parseKeyConfig(conf *service.ParsedConfig) (*keyConfig, error) {
 	if k.Set, err = conf.FieldInterpolatedString(fieldSet); err != nil {
 		return nil, err
 	}
-	if k.Key, err = conf.FieldInterpolatedString(fieldKey); err != nil {
-		return nil, err
-	}
 	if k.KeyType, err = conf.FieldString(fieldKeyType); err != nil {
 		return nil, err
 	}
 	if k.KeyEncoding, err = conf.FieldString(fieldKeyEncoding); err != nil {
 		return nil, err
+	}
+
+	keySet := conf.Contains(fieldKey)
+	digestSet := conf.Contains(fieldDigest)
+	if keySet == digestSet {
+		return nil, errors.New("exactly one of fields 'key' and 'digest' must be set")
+	}
+	if keySet {
+		if k.Key, err = conf.FieldInterpolatedString(fieldKey); err != nil {
+			return nil, err
+		}
+	} else {
+		if k.KeyType != "string" {
+			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is set", fieldKeyType, k.KeyType, fieldKey)
+		}
+		if k.KeyEncoding != "" && k.KeyEncoding != "utf8" {
+			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is set", fieldKeyEncoding, k.KeyEncoding, fieldKey)
+		}
+		if k.Digest, err = conf.FieldInterpolatedString(fieldDigest); err != nil {
+			return nil, err
+		}
+		if lit, ok := k.Digest.Static(); ok {
+			if _, err := decodeDigest(lit); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	if ns, ok := k.Namespace.Static(); ok {
@@ -131,35 +173,34 @@ type keyResolver struct {
 	key         *service.MessageBatchInterpolationExecutor
 	keyType     string
 	keyEncoding string
+	digest      *service.MessageBatchInterpolationExecutor
 }
 
 // resolver binds key interpolation to a batch so batch-aware Bloblang works.
 func (k *keyConfig) resolver(batch service.MessageBatch) *keyResolver {
-	return &keyResolver{
+	r := &keyResolver{
 		namespace:   batch.InterpolationExecutor(k.Namespace),
 		set:         batch.InterpolationExecutor(k.Set),
-		key:         batch.InterpolationExecutor(k.Key),
 		keyType:     k.KeyType,
 		keyEncoding: k.KeyEncoding,
 	}
+	if k.Key != nil {
+		r.key = batch.InterpolationExecutor(k.Key)
+	}
+	if k.Digest != nil {
+		r.digest = batch.InterpolationExecutor(k.Digest)
+	}
+	return r
 }
 
 // resolve builds the Aerospike key for the message at the given batch index.
 func (r *keyResolver) resolve(index int) (*as.Key, error) {
-	namespace, err := r.namespace.TryString(index)
+	namespace, setName, err := r.namespaceAndSet(index)
 	if err != nil {
-		return nil, fmt.Errorf("interpolating '%v': %w", fieldNamespace, err)
+		return nil, err
 	}
-	if err := validateNamespaceName(namespace); err != nil {
-		return nil, fmt.Errorf("field '%v': %w", fieldNamespace, err)
-	}
-
-	setName, err := r.set.TryString(index)
-	if err != nil {
-		return nil, fmt.Errorf("interpolating '%v': %w", fieldSet, err)
-	}
-	if err := validateSetName(setName); err != nil {
-		return nil, fmt.Errorf("field '%v': %w", fieldSet, err)
+	if r.digest != nil {
+		return r.resolveDigest(index, namespace, setName)
 	}
 
 	keyStr, err := r.key.TryString(index)
@@ -185,6 +226,60 @@ func (r *keyResolver) resolve(index int) (*as.Key, error) {
 		return nil, fmt.Errorf("building record key: %w", asErr)
 	}
 	return key, nil
+}
+
+func (r *keyResolver) namespaceAndSet(index int) (string, string, error) {
+	namespace, err := r.namespace.TryString(index)
+	if err != nil {
+		return "", "", fmt.Errorf("interpolating '%v': %w", fieldNamespace, err)
+	}
+	if err := validateNamespaceName(namespace); err != nil {
+		return "", "", fmt.Errorf("field '%v': %w", fieldNamespace, err)
+	}
+
+	setName, err := r.set.TryString(index)
+	if err != nil {
+		return "", "", fmt.Errorf("interpolating '%v': %w", fieldSet, err)
+	}
+	if err := validateSetName(setName); err != nil {
+		return "", "", fmt.Errorf("field '%v': %w", fieldSet, err)
+	}
+	return namespace, setName, nil
+}
+
+func (r *keyResolver) resolveDigest(index int, namespace, setName string) (*as.Key, error) {
+	s, err := r.digest.TryString(index)
+	if err != nil {
+		return nil, fmt.Errorf("interpolating '%v': %w", fieldDigest, err)
+	}
+	raw, err := decodeDigest(s)
+	if err != nil {
+		return nil, err
+	}
+	// A nil user key is stored as Aerospike null and is not sent, even when
+	// send_key is set. The digest is the record address.
+	key, asErr := as.NewKeyWithDigest(namespace, setName, nil, raw)
+	if asErr != nil {
+		return nil, fmt.Errorf("building record digest: %w", asErr)
+	}
+	return key, nil
+}
+
+// decodeDigest decodes a standard Base64 digest into the 20 bytes Aerospike
+// addresses a record by.
+func decodeDigest(s string) ([]byte, error) {
+	// A missing interpolated field stringifies to "null".
+	if s == "" || s == "null" {
+		return nil, fmt.Errorf("field '%v' resolved to %q, which is not a usable digest; the source field is probably missing from this message", fieldDigest, s)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("field '%v' is not standard Base64: %w", fieldDigest, err)
+	}
+	if len(decoded) != digestLen {
+		return nil, fmt.Errorf("field '%v' decoded to %d bytes, which is not the Aerospike digest length of %d", fieldDigest, len(decoded), digestLen)
+	}
+	return decoded, nil
 }
 
 func coerceKey(s, keyType, encoding string) (any, error) {

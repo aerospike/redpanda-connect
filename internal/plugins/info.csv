@@ -1,7 +1,6 @@
 name                      ,type      ,commercial_name           ,support    ,deprecated ,cloud ,cloud_with_gpu ,cloud_unsupported_reason
 a2a_message               ,processor ,a2a_message               ,enterprise ,n          ,y     ,y              ,
 aerospike                 ,output    ,aerospike                 ,community  ,n          ,n     ,n              ,not yet certified for cloud
-aerospike_lookup          ,processor ,aerospike_lookup          ,community  ,n          ,n     ,n              ,not yet certified for cloud
 amqp_0_9                  ,input     ,amqp_0_9                  ,certified  ,n          ,y     ,y              ,
 amqp_0_9                  ,output    ,amqp_0_9                  ,certified  ,n          ,y     ,y              ,
 amqp_1                    ,input     ,amqp_1                    ,community  ,n          ,n     ,n              ,not yet certified for cloud
@@ -250,6 +249,7 @@ salesforce                ,input     ,Salesforce                ,enterprise ,n  
 salesforce_cdc            ,input     ,Salesforce                ,enterprise ,n          ,y     ,y              ,
 salesforce_graphql        ,input     ,Salesforce                ,enterprise ,n          ,y     ,y              ,
 salesforce_sink           ,output    ,Salesforce                ,enterprise ,n          ,y     ,y              ,
+sap_hana                  ,input     ,SAP HANA                  ,enterprise ,n          ,n     ,n              ,not yet certified for cloud
 schema_registry           ,input     ,schema_registry           ,certified  ,n          ,y     ,y              ,
 schema_registry           ,output    ,schema_registry           ,certified  ,n          ,y     ,y              ,
 schema_registry_decode    ,processor ,schema_registry_decode    ,certified  ,n          ,y     ,y              ,

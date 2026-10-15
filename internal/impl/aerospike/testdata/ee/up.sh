@@ -71,12 +71,14 @@ node_set() {
 
 # recluster is ignored unless it is sent to the current principal.
 principal_container() {
-  local c stats node principal
+  local c stats node principal node_id principal_id
   for c in as-ee-1 as-ee-2; do
     stats="$(docker exec "$c" asinfo -v statistics 2>/dev/null || true)"
     node="$(docker exec "$c" asinfo -v node 2>/dev/null || true)"
     principal="$(printf '%s\n' "$stats" | tr ';' '\n' | sed -n 's/^cluster_principal=//p')"
-    if [[ -n "$node" && "$node" == "$principal" ]]; then
+    node_id="$(printf '%s' "$node" | tr '[:lower:]' '[:upper:]')"
+    principal_id="$(printf '%s' "$principal" | tr '[:lower:]' '[:upper:]')"
+    if [[ -n "$node_id" && "$node_id" == "$principal_id" ]]; then
       printf '%s' "$c"
       return
     fi
