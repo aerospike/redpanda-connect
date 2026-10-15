@@ -7,7 +7,7 @@ mkdir -p "$CERTS"
 
 cd "$CERTS"
 if [[ ! -f ca.pem || ! -f ca.key || "${FORCE:-}" == "1" ]]; then
-  rm -f ca.pem ca.key ca.srl server.pem server.key client.pem client.key
+  rm -f ca.pem ca.key ca.srl server.pem server.key client.pem client.key client.enc.key
   openssl req -x509 -newkey rsa:2048 -days 3650 -nodes \
     -subj "/CN=Aerospike EE test CA" \
     -keyout ca.key -out ca.pem
@@ -32,4 +32,15 @@ sign_cert() {
 sign_cert clusterA server.pem server.key "subjectAltName=DNS:localhost,DNS:as-ee-sec,DNS:clusterA,IP:127.0.0.1"
 # CN must be the Aerospike username used for PKI login. This tools image
 # cannot create a PKI-only user, and show users lists rpcn as password,PKI.
+if [[ ! -f client.pem || ! -f client.key || "${FORCE:-}" == "1" ]]; then
+  rm -f client.enc.key
+fi
 sign_cert rpcn client.pem client.key "extendedKeyUsage=clientAuth"
+
+# client.enc.key is the same client key encrypted as PKCS#8. The test password
+# is rpcnkey.
+if [[ ! -f client.enc.key || "${FORCE:-}" == "1" ]]; then
+  openssl pkcs8 -topk8 -v2 aes-256-cbc \
+    -in client.key -out client.enc.key -passout pass:rpcnkey
+  echo "wrote $CERTS/client.enc.key"
+fi
