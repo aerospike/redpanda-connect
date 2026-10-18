@@ -30,8 +30,7 @@ var tls13CipherSuites = map[string]struct{}{
 
 // cipherSuiteIDs maps configured IANA names to the suites crypto/tls will
 // offer. An empty list leaves the suites already selected by the tls field.
-// Matching ignores case, the same way kafka-inbound matches the JVM
-// suite list. The order of the result does not matter: Go ignores it.
+// Matching ignores case. The order of the result does not matter: Go ignores it.
 func cipherSuiteIDs(names []string) ([]uint16, error) {
 	if len(names) == 0 {
 		return nil, nil
@@ -58,6 +57,26 @@ func cipherSuiteIDs(names []string) ([]uint16, error) {
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+// insecureCipherNames returns the IANA names of ids that Go marks insecure.
+func insecureCipherNames(ids []uint16) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	byID := make(map[uint16]string)
+	for _, suite := range tls.InsecureCipherSuites() {
+		byID[suite.ID] = suite.Name
+	}
+	var names []string
+	for _, id := range ids {
+		name, ok := byID[id]
+		if !ok {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 func cipherSuiteID(supported []*tls.CipherSuite, name string) (uint16, bool) {

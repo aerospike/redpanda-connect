@@ -15,9 +15,11 @@
 package aerospike
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -229,6 +231,7 @@ ciphers:
 `)
 		require.NoError(t, err)
 		assert.Equal(t, []uint16{secure.ID, insecure.ID}, c.Policy.TlsConfig.CipherSuites)
+		assert.Equal(t, []string{insecure.Name}, c.insecureCiphers)
 	})
 
 	t.Run("unknown name", func(t *testing.T) {
@@ -251,6 +254,25 @@ ciphers: ["TLS_AES_128_GCM_SHA256"]
 `)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "TLS 1.3")
+	})
+
+	t.Run("insecure suite warns at startup", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := service.NewLoggerFromSlog(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		mgr := service.MockResources(service.MockResourcesOptUseLogger(logger))
+		conf, err := outputSpec().ParseYAML(`
+hosts: ["127.0.0.1:1"]
+namespace: test
+key: k
+tls:
+  enabled: true
+ciphers: ["`+insecure.Name+`"]
+`, nil)
+		require.NoError(t, err)
+		_, _, _, err = newAerospikeOutput(conf, mgr)
+		require.NoError(t, err)
+		assert.Contains(t, buf.String(), "insecure cipher suites")
+		assert.Contains(t, buf.String(), insecure.Name)
 	})
 
 	t.Run("requires tls", func(t *testing.T) {

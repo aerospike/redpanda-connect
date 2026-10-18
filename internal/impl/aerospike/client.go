@@ -129,19 +129,19 @@ func clientFields() []*service.ConfigField {
 		service.NewTLSToggledField(fieldTLS),
 
 		service.NewStringListField(fieldCiphers).
-			Description("TLS 1.2 cipher suites to offer, as IANA names such as `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. This is the kafka-inbound `tls.ciphers` allow-list. Empty leaves the suites selected by `tls`. Names are matched without case, and a name Go does not implement is rejected at startup. A suite Go marks insecure is accepted when it is named, so the list can match a server that still requires it. TLS 1.3 suites are always offered by the Go runtime and cannot be named here. Requires `tls.enabled`.").
+			Description("TLS 1.2 cipher suites to offer, as IANA names such as `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. Empty leaves the suites selected by `tls`. Names are matched without case, and a name Go does not implement is rejected at startup. A suite Go marks insecure is accepted when it is named, so the list can match a server that still requires it, and startup logs a warning for each one. TLS 1.3 suites are always offered by the Go runtime and cannot be named here. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}).
-			Version("4.114.0").
 			Advanced(),
 	}
 }
 
 // clientConfig is the parsed connection configuration.
 type clientConfig struct {
-	Hosts  []*as.Host
-	Policy *as.ClientPolicy
-	WarmUp bool
+	Hosts           []*as.Host
+	Policy          *as.ClientPolicy
+	WarmUp          bool
+	insecureCiphers []string
 }
 
 // sizePoolForConcurrency gives the connection pool a floor matching the number
@@ -267,6 +267,7 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 		}
 		if len(suites) > 0 {
 			tlsConf.CipherSuites = suites
+			c.insecureCiphers = insecureCipherNames(suites)
 		}
 		c.Policy.TlsConfig = tlsConf
 	}

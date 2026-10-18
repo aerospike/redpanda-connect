@@ -29,21 +29,18 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/redpanda-data/benthos/v4/public/service/integration"
 )
 
 // The server speaks TLS 1.2 only. The Go client always offers TLS 1.3, so a
 // TLS 1.2 suite mismatch would still connect unless the server refuses 1.3.
-func TestIntegrationCipherSuiteMismatch(t *testing.T) {
-	integration.CheckSkip(t)
-
+func TestCipherSuiteMismatch(t *testing.T) {
 	const serverSuite = "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
 	const clientSuite = "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
 	caPEM, serverCert := cipherHandshakeCert(t)
 
 	t.Run("same suite connects", func(t *testing.T) {
-		cfg := inboundTLSConfig(t, caPEM, serverSuite)
+		cfg := clientTLSConfig(t, caPEM, serverSuite)
+		require.Equal(t, []uint16{suiteNamed(t, tls.CipherSuites(), serverSuite).ID}, cfg.CipherSuites)
 		state, clientErr, serverErr := handshake(t, serverCert, serverSuite, cfg)
 		require.NoError(t, serverErr)
 		require.NoError(t, clientErr)
@@ -52,7 +49,7 @@ func TestIntegrationCipherSuiteMismatch(t *testing.T) {
 	})
 
 	t.Run("different suite fails", func(t *testing.T) {
-		cfg := inboundTLSConfig(t, caPEM, clientSuite)
+		cfg := clientTLSConfig(t, caPEM, clientSuite)
 		require.Equal(t, []uint16{suiteNamed(t, tls.CipherSuites(), clientSuite).ID}, cfg.CipherSuites)
 		_, clientErr, serverErr := handshake(t, serverCert, serverSuite, cfg)
 		require.Error(t, clientErr)
@@ -104,7 +101,7 @@ func handshake(t *testing.T, cert tls.Certificate, serverSuite string, clientCfg
 	return state, clientErr, <-serverErrc
 }
 
-func inboundTLSConfig(t *testing.T, caPEM []byte, suite string) *tls.Config {
+func clientTLSConfig(t *testing.T, caPEM []byte, suite string) *tls.Config {
 	t.Helper()
 	var yaml strings.Builder
 	yaml.WriteString("hosts: [\"127.0.0.1:1\"]\n")
