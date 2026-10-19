@@ -120,7 +120,7 @@ func clientFields() []*service.ConfigField {
 				Description("File whose first line is the Aerospike password. This is the kafka-inbound `credentials.password-file` path. The file is read once at startup, so a rotated password is picked up on the next restart. A trailing newline is not part of the password. Trailing spaces on the first line are kept. An empty first line fails startup. Set this or `password`, not both. A username with neither also fails startup. `pki` ignores this field. A missing or unreadable file fails startup. The file contents are not logged.").
 				Default("").
 				Example("/var/secrets/aerospike-password").
-				Version("4.114.0").
+				Version("4.115.0").
 				Advanced(),
 		).Description("Credentials for clusters with access control enabled. Aerospike Community Edition has no authentication; leave empty there.").
 			Optional().
@@ -147,14 +147,14 @@ func clientFields() []*service.ConfigField {
 			Description("TLS versions to offer. `TLSv1.2` does not offer TLS 1.3. `TLSv1.3` does not offer TLS 1.2. Empty, or both names, leaves the versions selected by `tls`: TLS 1.2 and TLS 1.3. Names are matched case-insensitively. `ciphers` fails startup when this list offers TLS 1.3 only. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"TLSv1.2"}).
-			Version("4.114.0").
+			Version("4.115.0").
 			Advanced(),
 
 		service.NewStringListField(fieldRevokeCertificates).
 			Description("Certificate serial numbers to reject. A value is a decimal integer, or a hex integer with a `0x` prefix. `openssl x509 -noout -serial` prints hex, so convert that to decimal or add the `0x` prefix. A hex value without the prefix is read as decimal when it contains only digits. A serial is unique only for its issuing CA, and the same number on any other certificate in the verified chain, including a root or intermediate, is also rejected. With `tls.skip_cert_verify`, only certificates the server sends are checked, so a root the server does not send is not seen. An empty list leaves the CA check as the only certificate check. A serial may be larger than a 64-bit integer. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"123123", "0x1E0F3"}).
-			Version("4.114.0").
+			Version("4.115.0").
 			Advanced(),
 	}
 }
