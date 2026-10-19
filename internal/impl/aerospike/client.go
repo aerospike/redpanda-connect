@@ -45,6 +45,7 @@ const (
 	fieldCredentialsPassword  = "password"
 	fieldTLS                  = "tls"
 	fieldCiphers              = "ciphers"
+	fieldProtocols            = "protocols"
 	fieldAuthMode             = "auth_mode"
 
 	// defaultServicePort is the Aerospike client service port.
@@ -129,9 +130,16 @@ func clientFields() []*service.ConfigField {
 		service.NewTLSToggledField(fieldTLS),
 
 		service.NewStringListField(fieldCiphers).
-			Description("TLS 1.2 cipher suites to offer, as IANA names such as `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. Empty leaves the suites selected by `tls`. Names are matched without case, and a name Go does not implement is rejected at startup. A suite Go marks insecure is accepted when it is named, so the list can match a server that still requires it, and startup logs a warning for each one. TLS 1.3 suites are always offered by the Go runtime and cannot be named here. Requires `tls.enabled`.").
+			Description("TLS 1.2 cipher suites to offer, as IANA names such as `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. Empty leaves the suites selected by `tls`. Names are matched case-insensitively, and a name Go does not implement is rejected at startup. A suite Go marks insecure is accepted when it is named, so the list can match a server that still requires it, and startup logs a warning for each one. TLS 1.3 suites cannot be named here. They stay offered unless `protocols` is `TLSv1.2`. Naming `ciphers` when `protocols` offers TLS 1.3 only fails startup. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}).
+			Advanced(),
+
+		service.NewStringListField(fieldProtocols).
+			Description("TLS versions to offer. `TLSv1.2` does not offer TLS 1.3. `TLSv1.3` does not offer TLS 1.2. Empty, or both names, leaves the versions selected by `tls`: TLS 1.2 and TLS 1.3. Names are matched case-insensitively. `ciphers` fails startup when this list offers TLS 1.3 only. Requires `tls.enabled`.").
+			Default([]string{}).
+			Example([]string{"TLSv1.2"}).
+			Version("4.114.0").
 			Advanced(),
 	}
 }
@@ -260,7 +268,20 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 	if len(cipherNames) > 0 && !tlsEnabled {
 		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldCiphers, fieldTLS)
 	}
+	protocolNames, err := conf.FieldStringList(fieldProtocols)
+	if err != nil {
+		return nil, err
+	}
+	if len(protocolNames) > 0 && !tlsEnabled {
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldProtocols, fieldTLS)
+	}
 	if tlsEnabled {
+		if err := applyTLSProtocols(tlsConf, protocolNames); err != nil {
+			return nil, err
+		}
+		if len(cipherNames) > 0 && tlsConf.MinVersion >= tls.VersionTLS13 {
+			return nil, fmt.Errorf("field '%s': TLS 1.2 cipher suites have no effect when '%s' offers TLS 1.3 only", fieldCiphers, fieldProtocols)
+		}
 		suites, err := cipherSuiteIDs(cipherNames)
 		if err != nil {
 			return nil, err
