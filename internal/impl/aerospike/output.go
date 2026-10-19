@@ -104,7 +104,7 @@ Writes are dispatched with a single batch command per output batch. Aerospike en
 concurrency limits per record, so multiple messages for the same key inside one batch are
 coalesced into one write by default (see ` + "`coalesce_batch_keys`" + `). Disable it only if
 you need strict one-message-one-write semantics (including per-message
-` + "`create_only`" + `/` + "`update_only`" + ` existence failures) and have confirmed keys do
+` + "`create_only`" + `/` + "`update_only`" + `/` + "`replace_only`" + ` existence failures) and have confirmed keys do
 not repeat.
 
 Coalescing applies **within a single batch only**. With the default
@@ -144,12 +144,13 @@ Aerospike has no client-side change feed.
 			Description(`The write operation to perform. One of:
 
 - `+"`write`"+` — create or update, merging these bins with any existing bins.
-- `+"`replace`"+` — create or replace, deleting existing bins not named here.
+- `+"`replace`"+` — create or replace, deleting existing bins not named here. A null bin is left out of the write. A replace whose every bin is null is rejected on that message.
+- `+"`replace_only`"+` — fail if the record does not exist, otherwise replace, deleting existing bins not named here. A null bin is left out of the write. A replace_only whose every bin is null is rejected on that message. This is `+"`record-exists-action: replace-only`"+` on the Aerospike Kafka sink connector.
 - `+"`create_only`"+` — fail if the record already exists.
 - `+"`update_only`"+` — fail if the record does not exist.
 - `+"`delete`"+` — delete the record.
 
-Interpolation allows routing per message, for example from a CDC operation field. For a compact topic or CDC stream that sends the full record each time, use `+"`replace`"+` so leftover bins cannot accumulate.`).
+Interpolation allows routing per message, for example from a CDC operation field. For a compact topic or CDC stream that sends the full record each time, use `+"`replace`"+` so leftover bins cannot accumulate. `+"`replace_only`"+` on a missing key returns `+"`KEY_NOT_FOUND`"+` (code `+"`2`"+`). That rejection does not go away on retry, so with `+"`auto_replay_nacks`"+` left on the message is replayed forever and holds the source partition until some other write creates the record. List `+"`2`"+` in `+"`ignore_error_codes`"+` to drop it, or wrap this output in `+"`output.fallback`"+` to send it elsewhere. Listing `+"`2`"+` acknowledges the message, so fallback does not see it.`).
 			Default("write").
 			Example("replace").
 			Example(`${! if json("op") == "d" { "delete" } else { "write" } }`),
@@ -159,7 +160,15 @@ Interpolation allows routing per message, for example from a CDC operation field
 			Default(true),
 
 		service.NewBloblangField(fieldBins).
-			Description("A Bloblang mapping producing an object whose keys are bin names and whose values are bin values. Bin names must be 1-15 characters. A `null` value deletes that bin from the record. Nested objects and arrays become Aerospike maps and lists. Bound collection size here — this output cannot append or trim on the server, and an unbounded list makes every subsequent write rewrite a larger record.").
+			Description("A Bloblang mapping producing an object whose keys are bin names and whose values are bin values. Bin names must be 1-15 characters. Nested objects and arrays become Aerospike maps and lists. Bound collection size here — this output cannot append or trim on the server, and an unbounded list makes every subsequent write rewrite a larger record.\n\n"+
+				"A `null` value depends on the operation:\n\n"+
+				"- `write` and `update_only` delete that bin from the record.\n"+
+				"- `replace` and `replace_only` leave that bin out of the write, because those operations already delete bins they do not name.\n"+
+				"- A `replace` or `replace_only` whose every value is null is rejected on that message while the batch is planned, before coalescing, so an earlier write of the same key still lands. That rejection does not clear on retry, and `ignore_error_codes` does not cover it, so it holds the source partition until the mapping changes.\n\n"+
+				"When coalescing folds a later message that nulls every bin into an earlier message for the same key, the folded command is a `delete`:\n\n"+
+				"- After an unfenced `replace`, a `write` or `update_only` produces the record those messages would leave, and a missing key is already that end state.\n"+
+				"- After a `replace_only`, an `update_only` keeps the existence check, so the delete fails if the record is missing.\n"+
+				"- After a `replace_only`, a `write` has already dropped the existence check, so the delete succeeds when the key is missing.").
 			Default("root = this").
 			Example(`root = this.without("user_id")`).
 			Example(`root.name = this.full_name
@@ -203,7 +212,18 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 			Default(false),
 
 		service.NewBoolField(fieldCoalesceBatchKeys).
-			Description("Collapse multiple messages for the same record key within a batch into a single write. Strongly recommended: sending them separately contends on one record, which surfaces as `KEY_BUSY` or as latency inflation with no error at all. Mixing `create_only` or `update_only` with `write`/`replace`/`delete` for the same key drops the existence check so a successful write is not nacked as `KEY_EXISTS`/`KEY_NOT_FOUND`.\n\nMessages carrying a `generation` are never coalesced, and coalescing only ever applies within one batch — see `max_in_flight` for what happens across concurrent batches.").
+			Description("Collapse multiple messages for the same record key within a batch into a single write. Strongly recommended: sending them separately contends on one record, which surfaces as `KEY_BUSY` or as latency inflation with no error at all.\n\n"+
+				"Messages carrying a `generation` are never coalesced, and coalescing only ever applies within one batch — see `max_in_flight` for what happens across concurrent batches.\n\n"+
+				"When messages with different operations fold into one command, the existence check (`KEY_EXISTS` or `KEY_NOT_FOUND`) is kept or dropped as follows:\n\n"+
+				"- `create_only`, `update_only`, or `replace_only` mixed with `write` or `replace` drops the check, so a successful write is not nacked.\n"+
+				"- `update_only` folded with `replace_only` keeps the check, as do two `replace_only` messages that both name a bin.\n"+
+				"- A later `update_only` that nulls every bin of a `replace_only` keeps the check. The result is a delete that fails if the record is missing.\n"+
+				"- A later `write` that nulls every bin of a `replace_only` drops the check, because folding the `write` already dropped it. The delete succeeds when the key is missing.\n"+
+				"- `create_only` after `replace_only` becomes a `replace` carrying both payloads, because one command cannot fail the create when the key exists and also fail the replace when it does not. That write succeeds whether the key exists or not.\n\n"+
+				"Deletes and null bins fold as follows:\n\n"+
+				"- An unfenced `delete` followed by `update_only` or `replace_only` drops the later message: the record stays deleted and that payload is not written. With fencing on, that later message is written as a `replace`, because the tombstone record is still there.\n"+
+				"- An all-null `replace` or `replace_only` is rejected on its own message before coalescing, so it does not delete a preceding write.\n"+
+				"- A later `write` or `update_only` that nulls every bin of an earlier unfenced `replace` becomes a `delete`, which is the record those messages would leave.").
 			Default(true).
 			Advanced(),
 
@@ -225,6 +245,8 @@ Code `+"`20`"+` is returned when the resolved namespace is not declared on the c
 Code `+"`21`"+` also covers a top-level bin name longer than 15 bytes. That name is rejected while the batch is planned, so the record is never sent and the server does not return 21. A key inside a map or list is not a bin name and is not code 21.
 
 Code `+"`22`"+` is returned when a positive TTL is written to a namespace with `+"`nsup-period 0`"+`. TTL values `+"`0`"+`, `+"`-1`"+` (`+"`never`"+`), and `+"`-2`"+` (`+"`keep`"+`) do not return 22.
+
+Code `+"`2`"+` (`+"`KEY_NOT_FOUND`"+`) is returned by `+"`update_only`"+` and `+"`replace_only`"+` when the record does not exist, and by a delete that coalescing produced from `+"`replace_only`"+` after every bin was nulled. A plain delete of a missing record does not return it. Listing `+"`2`"+` drops those messages. Prefer `+"`output.fallback`"+` when a missing key should be sent somewhere else rather than dropped.
 
 With `+"`coalesce_batch_keys`"+` left on, several messages for one key become one record. A listed code on that record acknowledges every message that folded into it, including messages that would have fit on their own.
 
@@ -264,7 +286,7 @@ Those discards increment the `+"`aerospike_filtered_out`"+` counter and are logg
 
 When fencing is enabled, deletes do not remove the record: they replace it with the fence plus a
 tombstone bin, so a later replay cannot resurrect stale data. Readers should treat that tombstone
-as not found. `+"`create_only`"+` after a fenced delete fails because the tombstone still exists.`).
+as not found. `+"`create_only`"+` after a fenced delete fails because the tombstone still exists. `+"`replace_only`"+` succeeds and removes the tombstone, because the record is still there.`).
 			Advanced(),
 
 		service.NewBatchPolicyField(fieldBatching).

@@ -73,6 +73,10 @@ output:
             set: users
             key: '${! json("user_id").catch(meta("kafka_key")) }'
             bins: 'root = this.without("user_id", "ttl")'
+            # replace leaves a null bin out of the write. A message whose every bin
+            # is null is rejected, and ignore_error_codes does not cover it.
+            # replace_only also fails a missing key with KEY_NOT_FOUND (code 2).
+            # List 2 in ignore_error_codes to drop it, or use output.fallback.
             operation: replace
             tombstone_as_delete: true
             ttl: '${! json("ttl").or("keep") }'
