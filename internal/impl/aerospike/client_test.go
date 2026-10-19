@@ -22,6 +22,8 @@ import (
 	"encoding/base64"
 	"log/slog"
 	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +194,98 @@ credentials:
 	err := w.Connect(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Password authentication is disabled")
+}
+
+func TestParsePasswordFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aerospike-password")
+	require.NoError(t, os.WriteFile(path, []byte("p@ss w0rd \r\nignored\n"), 0o600))
+
+	t.Run("first line keeps trailing spaces", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+  password_file: `+path+`
+`)
+		require.NoError(t, err)
+		assert.Equal(t, "rpcn", c.Policy.User)
+		assert.Equal(t, "p@ss w0rd ", c.Policy.Password)
+	})
+
+	t.Run("both password and file", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+  password: secret
+  password_file: `+path+`
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not both")
+		assert.NotContains(t, err.Error(), "p@ss")
+	})
+
+	t.Run("username without a password", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "set 'password' or 'password_file'")
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		missing := filepath.Join(dir, "missing")
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+  password_file: `+missing+`
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot read")
+		assert.ErrorIs(t, err, os.ErrNotExist)
+		assert.NotContains(t, err.Error(), "p@ss")
+	})
+
+	t.Run("directory is not a password file", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+  password_file: `+dir+`
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot read")
+		assert.NotErrorIs(t, err, os.ErrNotExist)
+	})
+
+	t.Run("empty file is rejected", func(t *testing.T) {
+		empty := filepath.Join(dir, "empty")
+		require.NoError(t, os.WriteFile(empty, []byte("\n"), 0o600))
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+credentials:
+  username: rpcn
+  password_file: `+empty+`
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "is empty")
+	})
+
+	t.Run("pki ignores the file", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+auth_mode: pki
+credentials:
+  password_file: `+path+`
+`)
+		require.NoError(t, err)
+		assert.Equal(t, as.AuthModePKI, c.Policy.AuthMode)
+		assert.Empty(t, c.Policy.Password)
+	})
 }
 
 func suiteNamed(t *testing.T, suites []*tls.CipherSuite, name string) *tls.CipherSuite {
