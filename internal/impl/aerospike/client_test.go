@@ -285,6 +285,98 @@ ciphers: ["`+secure.Name+`"]
 	})
 }
 
+func TestParseTLSProtocols(t *testing.T) {
+	t.Run("empty leaves tls 1.2 and tls 1.3", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+`)
+		require.NoError(t, err)
+		assert.Equal(t, uint16(tls.VersionTLS12), c.Policy.TlsConfig.MinVersion)
+		assert.Zero(t, c.Policy.TlsConfig.MaxVersion)
+	})
+
+	t.Run("tls 1.2 does not offer tls 1.3", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: ["tlsv1.2", "TLSv1.2"]
+`)
+		require.NoError(t, err)
+		assert.Equal(t, uint16(tls.VersionTLS12), c.Policy.TlsConfig.MinVersion)
+		assert.Equal(t, uint16(tls.VersionTLS12), c.Policy.TlsConfig.MaxVersion)
+	})
+
+	t.Run("tls 1.3 does not offer tls 1.2", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: ["TLSv1.3"]
+`)
+		require.NoError(t, err)
+		assert.Equal(t, uint16(tls.VersionTLS13), c.Policy.TlsConfig.MinVersion)
+		assert.Zero(t, c.Policy.TlsConfig.MaxVersion)
+	})
+
+	t.Run("both names leave the default versions", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: ["TLSv1.2", "TLSv1.3"]
+`)
+		require.NoError(t, err)
+		assert.Equal(t, uint16(tls.VersionTLS12), c.Policy.TlsConfig.MinVersion)
+		assert.Zero(t, c.Policy.TlsConfig.MaxVersion)
+	})
+
+	t.Run("unknown protocol", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: ["TLSv1.1"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unknown protocol "TLSv1.1"`)
+	})
+
+	t.Run("empty name", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: [" "]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty protocol name")
+	})
+
+	t.Run("requires tls", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+protocols: ["TLSv1.2"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "requires 'tls.enabled'")
+	})
+
+	t.Run("ciphers with tls 1.3 only fails startup", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+protocols: ["TLSv1.3"]
+ciphers: ["TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "TLS 1.3 only")
+	})
+}
+
 func TestParseHost(t *testing.T) {
 	tests := []struct {
 		in      string

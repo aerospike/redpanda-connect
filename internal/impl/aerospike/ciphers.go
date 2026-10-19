@@ -20,14 +20,6 @@ import (
 	"strings"
 )
 
-// tls13CipherSuites are chosen by the Go runtime. crypto/tls rejects them in
-// Config.CipherSuites, which only configures TLS 1.0–1.2.
-var tls13CipherSuites = map[string]struct{}{
-	"TLS_AES_128_GCM_SHA256":       {},
-	"TLS_AES_256_GCM_SHA384":       {},
-	"TLS_CHACHA20_POLY1305_SHA256": {},
-}
-
 // cipherSuiteIDs maps configured IANA names to the suites crypto/tls will
 // offer. An empty list leaves the suites already selected by the tls field.
 // Matching ignores case. The order of the result does not matter: Go ignores it.
@@ -43,20 +35,34 @@ func cipherSuiteIDs(names []string) ([]uint16, error) {
 		if name == "" {
 			return nil, fmt.Errorf("field '%s' contains an empty cipher name", fieldCiphers)
 		}
-		if _, ok := tls13CipherSuites[strings.ToUpper(name)]; ok {
-			return nil, fmt.Errorf("field '%s': %s is a TLS 1.3 cipher suite, which the Go client always offers and does not accept in this list", fieldCiphers, name)
-		}
-		id, ok := cipherSuiteID(supported, name)
-		if !ok {
+		suite := cipherSuiteByName(supported, name)
+		if suite == nil {
 			return nil, fmt.Errorf("field '%s': unknown cipher %q", fieldCiphers, name)
 		}
-		if _, dup := seen[id]; dup {
+		if tls13Only(suite) {
+			return nil, fmt.Errorf("field '%s': %s is a TLS 1.3 cipher suite, which the Go client always offers and does not accept in this list", fieldCiphers, name)
+		}
+		if _, dup := seen[suite.ID]; dup {
 			continue
 		}
-		seen[id] = struct{}{}
-		out = append(out, id)
+		seen[suite.ID] = struct{}{}
+		out = append(out, suite.ID)
 	}
 	return out, nil
+}
+
+// tls13Only reports whether Go offers the suite for TLS 1.3 and no earlier
+// version. crypto/tls rejects those IDs in Config.CipherSuites.
+func tls13Only(suite *tls.CipherSuite) bool {
+	if len(suite.SupportedVersions) == 0 {
+		return false
+	}
+	for _, version := range suite.SupportedVersions {
+		if version != tls.VersionTLS13 {
+			return false
+		}
+	}
+	return true
 }
 
 // insecureCipherNames returns the IANA names of ids that Go marks insecure.
@@ -79,11 +85,11 @@ func insecureCipherNames(ids []uint16) []string {
 	return names
 }
 
-func cipherSuiteID(supported []*tls.CipherSuite, name string) (uint16, bool) {
+func cipherSuiteByName(supported []*tls.CipherSuite, name string) *tls.CipherSuite {
 	for _, suite := range supported {
 		if strings.EqualFold(suite.Name, name) {
-			return suite.ID, true
+			return suite
 		}
 	}
-	return 0, false
+	return nil
 }
