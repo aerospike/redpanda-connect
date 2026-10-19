@@ -53,7 +53,7 @@ func revokedSerials(names []string) ([]*big.Int, error) {
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
-			return nil, fmt.Errorf("field '%s' contains an empty serial number", asFieldRevokeCertificates)
+			return nil, fmt.Errorf("field '%s' contains an empty serial number", aoFieldRevokeCertificates)
 		}
 		n, err := parseRevokedSerial(name)
 		if err != nil {
@@ -81,7 +81,7 @@ func parseRevokedSerial(name string) (*big.Int, error) {
 		digits = name[2:]
 	}
 	if !serialDigits(digits, hex) {
-		return nil, fmt.Errorf("field '%s': serial %q must be a decimal integer or a hex integer with a 0x prefix", asFieldRevokeCertificates, name)
+		return nil, fmt.Errorf("field '%s': serial %q must be a decimal integer or a hex integer with a 0x prefix", aoFieldRevokeCertificates, name)
 	}
 	n, _ := new(big.Int).SetString(digits, base)
 	return n, nil

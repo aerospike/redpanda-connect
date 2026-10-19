@@ -32,7 +32,7 @@ type longBinNameError struct {
 }
 
 func (e *longBinNameError) Error() string {
-	return fmt.Sprintf("bin name %q is %d bytes, which exceeds the Aerospike limit of %d; rename it in the '%v' mapping", e.name, e.n, maxBinNameLen, asFieldBins)
+	return fmt.Sprintf("bin name %q is %d bytes, which exceeds the Aerospike limit of %d; rename it in the '%v' mapping", e.name, e.n, maxBinNameLen, aoFieldBins)
 }
 
 // classifyRecord converts a per-key batch result into an error, or nil when the
@@ -85,9 +85,9 @@ func explain(code types.ResultCode, op *pendingOp) string {
 	case types.KEY_BUSY:
 		return explainResultCode(code) + ". Enabling coalesce_batch_keys collapses repeats of a key within a batch"
 	case types.BIN_NAME_TOO_LONG:
-		return explainResultCode(code) + fmt.Sprintf("; rename it in the '%v' mapping", asFieldBins)
+		return explainResultCode(code) + fmt.Sprintf("; rename it in the '%v' mapping", aoFieldBins)
 	case types.BIN_TYPE_ERROR:
-		return explainResultCode(code) + fmt.Sprintf("; check '%v'", asFieldCoerceIntegralFloats)
+		return explainResultCode(code) + fmt.Sprintf("; check '%v'", aoFieldCoerceIntegralFloats)
 	}
 	return explainResultCode(code)
 }

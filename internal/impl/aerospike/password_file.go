@@ -32,7 +32,7 @@ func applyPasswordFile(policy *as.ClientPolicy, passwordFile string) (ignored bo
 		return passwordFile != "", nil
 	}
 	if passwordFile != "" && policy.Password != "" {
-		return false, fmt.Errorf("field '%s': set '%s' or '%s', not both", asFieldCredentials, asFieldCredentialsPassword, asFieldCredentialsPasswordFile)
+		return false, fmt.Errorf("field '%s': set '%s' or '%s', not both", aoFieldCredentials, aoFieldCredentialsPassword, aoFieldCredentialsPasswordFile)
 	}
 	if passwordFile != "" {
 		password, readErr := passwordFromFile(passwordFile)
@@ -43,7 +43,7 @@ func applyPasswordFile(policy *as.ClientPolicy, passwordFile string) (ignored bo
 		return false, nil
 	}
 	if policy.User != "" && policy.Password == "" {
-		return false, fmt.Errorf("field '%s': set '%s' or '%s'", asFieldCredentials, asFieldCredentialsPassword, asFieldCredentialsPasswordFile)
+		return false, fmt.Errorf("field '%s': set '%s' or '%s'", aoFieldCredentials, aoFieldCredentialsPassword, aoFieldCredentialsPasswordFile)
 	}
 	return false, nil
 }
@@ -53,14 +53,14 @@ func applyPasswordFile(policy *as.ClientPolicy, passwordFile string) (ignored bo
 func passwordFromFile(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("field '%s.%s': cannot read %s: %w", asFieldCredentials, asFieldCredentialsPasswordFile, path, err)
+		return "", fmt.Errorf("field '%s.%s': cannot read %s: %w", aoFieldCredentials, aoFieldCredentialsPasswordFile, path, err)
 	}
 	s := string(b)
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = s[:i]
 	}
 	if s == "" {
-		return "", fmt.Errorf("field '%s.%s': %s is empty", asFieldCredentials, asFieldCredentialsPasswordFile, path)
+		return "", fmt.Errorf("field '%s.%s': %s is empty", aoFieldCredentials, aoFieldCredentialsPasswordFile, path)
 	}
 	return s, nil
 }

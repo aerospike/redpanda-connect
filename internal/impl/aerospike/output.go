@@ -27,23 +27,23 @@ import (
 )
 
 const (
-	asFieldOperation            = "operation"
-	asFieldTombstoneAsDelete    = "tombstone_as_delete"
-	asFieldCoerceIntegralFloats = "coerce_integral_floats"
-	asFieldTTL                  = "ttl"
-	asFieldGeneration           = "generation"
-	asFieldSendKey              = "send_key"
-	asFieldDurableDelete        = "durable_delete"
-	asFieldCoalesceBatchKeys    = "coalesce_batch_keys"
-	asFieldMaxRecordBytes       = "max_record_bytes"
-	asFieldIgnoreErrorCodes     = "ignore_error_codes"
-	asFieldFencing              = "fencing"
-	asFieldFencingEnabled       = "enabled"
-	asFieldFencingBin           = "bin"
-	asFieldFencingValue         = "value"
-	asFieldFencingTombstoneBin  = "tombstone_bin"
-	asFieldFencingTombstoneTTL  = "tombstone_ttl"
-	asFieldBatching             = "batching"
+	aoFieldOperation            = "operation"
+	aoFieldTombstoneAsDelete    = "tombstone_as_delete"
+	aoFieldCoerceIntegralFloats = "coerce_integral_floats"
+	aoFieldTTL                  = "ttl"
+	aoFieldGeneration           = "generation"
+	aoFieldSendKey              = "send_key"
+	aoFieldDurableDelete        = "durable_delete"
+	aoFieldCoalesceBatchKeys    = "coalesce_batch_keys"
+	aoFieldMaxRecordBytes       = "max_record_bytes"
+	aoFieldIgnoreErrorCodes     = "ignore_error_codes"
+	aoFieldFencing              = "fencing"
+	aoFieldFencingEnabled       = "enabled"
+	aoFieldFencingBin           = "bin"
+	aoFieldFencingValue         = "value"
+	aoFieldFencingTombstoneBin  = "tombstone_bin"
+	aoFieldFencingTombstoneTTL  = "tombstone_ttl"
+	aoFieldBatching             = "batching"
 
 	// defaultBatchCount and defaultBatchPeriod are applied when no batching
 	// policy is configured. An unbatched database sink round-trips per message,
@@ -140,7 +140,7 @@ Aerospike has no client-side change feed.
 	spec = spec.Fields(outputKeyFields(`${! json("user_id") }`, `${! meta("kafka_key") }`)...)
 
 	spec = spec.Fields(
-		service.NewInterpolatedStringField(asFieldOperation).
+		service.NewInterpolatedStringField(aoFieldOperation).
 			Description(`The write operation to perform. One of:
 
 - `+"`write`"+` — create or update, merging these bins with any existing bins.
@@ -155,11 +155,11 @@ Interpolation allows routing per message, for example from a CDC operation field
 			Example("replace").
 			Example(`${! if json("op") == "d" { "delete" } else { "write" } }`),
 
-		service.NewBoolField(asFieldTombstoneAsDelete).
+		service.NewBoolField(aoFieldTombstoneAsDelete).
 			Description("Treat a message with an empty or `null` payload as a delete, matching the Kafka tombstone convention. Applied before `operation` is evaluated. Disable this for HTTP, file, or other sources where an empty body is not a delete.").
 			Default(true),
 
-		service.NewBloblangField(asFieldBins).
+		service.NewBloblangField(aoFieldBins).
 			Description("A Bloblang mapping producing an object whose keys are bin names and whose values are bin values. Bin names must be 1-15 characters. Nested objects and arrays become Aerospike maps and lists. Bound collection size here — this output cannot append or trim on the server, and an unbounded list makes every subsequent write rewrite a larger record.\n\n"+
 				"A `null` value depends on the operation:\n\n"+
 				"- `write` and `update_only` delete that bin from the record.\n"+
@@ -176,12 +176,12 @@ root.email = this.email_address
 root.updated = this.updated_at_epoch_seconds
 root.events = this.events.slice(0, 50)`),
 
-		service.NewBoolField(asFieldCoerceIntegralFloats).
+		service.NewBoolField(aoFieldCoerceIntegralFloats).
 			Description("Store JSON numbers with no fractional part as Aerospike integers rather than doubles. JSON has a single number type, so without this an identifier or counter arrives as a double, which breaks integer comparisons, `add` operations and integer secondary indexes.\n\nThe trade-off is that the stored type then depends on the value: a `price` bin holding `10.0` is written as an integer while `10.5` is written as a double. Aerospike types bins per record rather than per set, so this raises no error, but an integer secondary index over such a bin only indexes the records that happened to be integral. Disable this for bins that are genuinely floating point, or coerce the type explicitly in the `bins` mapping.").
 			Default(true).
 			Advanced(),
 
-		service.NewInterpolatedStringField(asFieldTTL).
+		service.NewInterpolatedStringField(aoFieldTTL).
 			Description(`Record time-to-live. Accepts a duration such as `+"`24h`"+`, unit spellings (`+"`24H`"+`, `+"`1D`"+`, `+"`5M`"+`, `+"`60S`"+`, or a bare number of seconds), or:
 
 - `+"`0s`"+` / `+"`0`"+` — use the namespace `+"`default-ttl`"+`. Every write with this value re-bases void-time to that default.
@@ -197,21 +197,21 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 			Example("never").
 			Example("keep"),
 
-		service.NewInterpolatedStringField(asFieldGeneration).
+		service.NewInterpolatedStringField(aoFieldGeneration).
 			Description("Expected record generation for a compare-and-set write. When set, the write fails if the stored generation does not match. Empty disables the check. The value is the generation the producer read the record at.\n\nA compare-and-set message is never coalesced, even with `coalesce_batch_keys` enabled: the check refers to the specific record that was read, and one command can carry only one expected generation. If several messages in a batch target the same key and any of them carries a generation, each is sent as its own command and the server arbitrates. On `GENERATION_ERROR` the correct recovery is to re-read the record and redo the change, not to retry the same write.").
 			Default("").
 			Example(`${! meta("aerospike_generation") }`).
 			Advanced(),
 
-		service.NewBoolField(asFieldSendKey).
+		service.NewBoolField(aoFieldSendKey).
 			Description("Store the primary key alongside the record, so reads can return it. Aerospike stores only a digest by default, meaning the original key is not recoverable from the record.").
 			Default(false),
 
-		service.NewBoolField(asFieldDurableDelete).
+		service.NewBoolField(aoFieldDurableDelete).
 			Description("Write a tombstone on delete so deleted records cannot reappear after a cold restart. Enterprise Edition only.").
 			Default(false),
 
-		service.NewBoolField(asFieldCoalesceBatchKeys).
+		service.NewBoolField(aoFieldCoalesceBatchKeys).
 			Description("Collapse multiple messages for the same record key within a batch into a single write. Strongly recommended: sending them separately contends on one record, which surfaces as `KEY_BUSY` or as latency inflation with no error at all.\n\n"+
 				"Messages carrying a `generation` are never coalesced, and coalescing only ever applies within one batch — see `max_in_flight` for what happens across concurrent batches.\n\n"+
 				"When messages with different operations fold into one command, the existence check (`KEY_EXISTS` or `KEY_NOT_FOUND`) is kept or dropped as follows:\n\n"+
@@ -229,13 +229,13 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 
 		commitLevelField(),
 
-		service.NewIntField(asFieldMaxRecordBytes).
+		service.NewIntField(aoFieldMaxRecordBytes).
 			Description("Reject a mapped record whose bins exceed this many bytes (approximate). `0` disables the check. Aerospike rewrites the whole record on every update, so treat anything above about 50 KiB as a modeling decision to justify — set a budget here rather than waiting for `RECORD_TOO_BIG`.").
 			Default(0).
 			LintRule(nonNegativeLint).
 			Advanced(),
 
-		service.NewIntListField(asFieldIgnoreErrorCodes).
+		service.NewIntListField(aoFieldIgnoreErrorCodes).
 			Description(`Aerospike result codes to acknowledge instead of failing the message. Empty by default, so a rejection is still a failure and Connect retries it.
 
 A listed code is logged at warning, counted in `+"`aerospike_ignored_errors`"+`, and then acknowledged. That drops the message: the record is not written, the payload is not kept, and `+"`output.fallback`"+` does not see it, because this output reported success. Use this for a permanent reject such as `+"`13`"+` (`+"`RECORD_TOO_BIG`"+`), `+"`20`"+` (`+"`INVALID_NAMESPACE`"+`), `+"`21`"+` (`+"`BIN_NAME_TOO_LONG`"+`), or `+"`22`"+` (`+"`FAIL_FORBIDDEN`"+`), which would otherwise retry forever and hold the source partition.
@@ -258,22 +258,22 @@ A connection failure of the batch is still a failure. So is any mapping error ot
 	)
 	spec = spec.Fields(batchPolicyFieldsWithRetries(0)...)
 	return spec.Fields(
-		service.NewObjectField(asFieldFencing,
-			service.NewBoolField(asFieldFencingEnabled).
+		service.NewObjectField(aoFieldFencing,
+			service.NewBoolField(aoFieldFencingEnabled).
 				Description("Enable fencing.").
 				Default(false),
-			service.NewStringField(asFieldFencingBin).
+			service.NewStringField(aoFieldFencingBin).
 				Description("Bin holding the fence value. Counts toward the 15 character bin name limit. Readers of these records should ignore it, since it is bookkeeping rather than data.").
 				Default(defaultFenceBin),
-			service.NewInterpolatedStringField(asFieldFencingValue).
+			service.NewInterpolatedStringField(aoFieldFencingValue).
 				Description("An integer that increases monotonically for a given record key. The Kafka offset satisfies this when keys map to partitions consistently, which is the default partitioner's behaviour.").
 				Default(`${! meta("kafka_offset") }`).
 				Example(`${! meta("kafka_timestamp_ms") }`).
 				Example(`${! json("version") }`),
-			service.NewStringField(asFieldFencingTombstoneBin).
+			service.NewStringField(aoFieldFencingTombstoneBin).
 				Description("Bin written on a fenced delete to mark the record as a tombstone. Readers should treat a record carrying this bin as missing. Counts toward the 15 character bin name limit.").
 				Default(defaultTombstoneBin),
-			service.NewStringField(asFieldFencingTombstoneTTL).
+			service.NewStringField(aoFieldFencingTombstoneTTL).
 				Description(`Time-to-live for fenced tombstone records. Accepts a duration, or `+"`never`"+`. Defaults to `+"`never`"+` so the fence outlives the data TTL; if the tombstone expires, a stale replay can recreate the record.
 
 Note that `+"`never`"+` means fenced deletes accumulate without bound: the records stay small, but Aerospike does not evict records that have no void-time, so a delete-heavy workload grows the namespace monotonically. Set a duration comfortably longer than the longest replay or redelivery window you need to defend against — beyond that point a replay is no longer a realistic risk — and budget the primary index at roughly 64 bytes per record per replica in the meantime.`).
@@ -289,7 +289,7 @@ tombstone bin, so a later replay cannot resurrect stale data. Readers should tre
 as not found. `+"`create_only`"+` after a fenced delete fails because the tombstone still exists. `+"`replace_only`"+` succeeds and removes the tombstone, because the record is still there.`).
 			Advanced(),
 
-		service.NewBatchPolicyField(asFieldBatching).
+		service.NewBatchPolicyField(aoFieldBatching).
 			Description(fmt.Sprintf("Allows you to configure a batching policy. When this object is omitted, the output applies a default of %d messages or %s, whichever comes first, because an unbatched database sink round-trips per message. The field reference below shows `count: 0`, which is how the framework renders an unset policy — the default above is what actually runs, and the output logs it on startup. Set `count: 1` to write one message per command.", defaultBatchCount, defaultBatchPeriod)),
 
 		service.NewOutputMaxInFlightField().
@@ -443,53 +443,53 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 		return nil, err
 	}
 
-	if c.operation, err = conf.FieldInterpolatedString(asFieldOperation); err != nil {
+	if c.operation, err = conf.FieldInterpolatedString(aoFieldOperation); err != nil {
 		return nil, err
 	}
 	// Resolve and validate a non-dynamic operation up front, so a typo fails at
 	// startup rather than on the first message.
 	if lit, ok := c.operation.Static(); ok {
 		if c.staticOperation, err = parseOpKind(lit); err != nil {
-			return nil, fmt.Errorf("field '%v': %w", asFieldOperation, err)
+			return nil, fmt.Errorf("field '%v': %w", aoFieldOperation, err)
 		}
 		c.operationIsStatic = true
 	}
-	if c.tombstoneAsDelete, err = conf.FieldBool(asFieldTombstoneAsDelete); err != nil {
+	if c.tombstoneAsDelete, err = conf.FieldBool(aoFieldTombstoneAsDelete); err != nil {
 		return nil, err
 	}
 
-	if c.bins, err = conf.FieldBloblang(asFieldBins); err != nil {
+	if c.bins, err = conf.FieldBloblang(aoFieldBins); err != nil {
 		return nil, err
 	}
-	if c.coerceInts, err = conf.FieldBool(asFieldCoerceIntegralFloats); err != nil {
+	if c.coerceInts, err = conf.FieldBool(aoFieldCoerceIntegralFloats); err != nil {
 		return nil, err
 	}
 
-	if c.ttl, err = conf.FieldInterpolatedString(asFieldTTL); err != nil {
+	if c.ttl, err = conf.FieldInterpolatedString(aoFieldTTL); err != nil {
 		return nil, err
 	}
 	if lit, ok := c.ttl.Static(); ok {
 		if c.staticTTL, err = parseTTL(lit); err != nil {
-			return nil, fmt.Errorf("field '%v': %w", asFieldTTL, err)
+			return nil, fmt.Errorf("field '%v': %w", aoFieldTTL, err)
 		}
 		c.ttlIsStatic = true
 	}
 
-	if c.generation, err = conf.FieldInterpolatedString(asFieldGeneration); err != nil {
+	if c.generation, err = conf.FieldInterpolatedString(aoFieldGeneration); err != nil {
 		return nil, err
 	}
 
-	if c.coalesce, err = conf.FieldBool(asFieldCoalesceBatchKeys); err != nil {
+	if c.coalesce, err = conf.FieldBool(aoFieldCoalesceBatchKeys); err != nil {
 		return nil, err
 	}
-	if c.maxRecordBytes, err = conf.FieldInt(asFieldMaxRecordBytes); err != nil {
+	if c.maxRecordBytes, err = conf.FieldInt(aoFieldMaxRecordBytes); err != nil {
 		return nil, err
 	}
 	if c.maxRecordBytes < 0 {
-		return nil, fmt.Errorf("field '%v' must not be negative", asFieldMaxRecordBytes)
+		return nil, fmt.Errorf("field '%v' must not be negative", aoFieldMaxRecordBytes)
 	}
 
-	codes, err := conf.FieldIntList(asFieldIgnoreErrorCodes)
+	codes, err := conf.FieldIntList(aoFieldIgnoreErrorCodes)
 	if err != nil {
 		return nil, err
 	}
@@ -498,51 +498,51 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 		for _, code := range codes {
 			if retryableIgnore(code) {
 				return nil, fmt.Errorf("field '%v': code %d (%s) is retryable or not an error and must not be listed",
-					asFieldIgnoreErrorCodes, code, types.ResultCodeToString(types.ResultCode(code)))
+					aoFieldIgnoreErrorCodes, code, types.ResultCodeToString(types.ResultCode(code)))
 			}
 			c.ignoreCodes[code] = struct{}{}
 		}
 	}
 
-	if conf.Contains(asFieldFencing) {
-		fc := conf.Namespace(asFieldFencing)
-		if c.fenceEnabled, err = fc.FieldBool(asFieldFencingEnabled); err != nil {
+	if conf.Contains(aoFieldFencing) {
+		fc := conf.Namespace(aoFieldFencing)
+		if c.fenceEnabled, err = fc.FieldBool(aoFieldFencingEnabled); err != nil {
 			return nil, err
 		}
-		if c.fenceBin, err = fc.FieldString(asFieldFencingBin); err != nil {
+		if c.fenceBin, err = fc.FieldString(aoFieldFencingBin); err != nil {
 			return nil, err
 		}
-		if c.fenceValue, err = fc.FieldInterpolatedString(asFieldFencingValue); err != nil {
+		if c.fenceValue, err = fc.FieldInterpolatedString(aoFieldFencingValue); err != nil {
 			return nil, err
 		}
-		if c.tombstoneBin, err = fc.FieldString(asFieldFencingTombstoneBin); err != nil {
+		if c.tombstoneBin, err = fc.FieldString(aoFieldFencingTombstoneBin); err != nil {
 			return nil, err
 		}
-		ttlStr, err := fc.FieldString(asFieldFencingTombstoneTTL)
+		ttlStr, err := fc.FieldString(aoFieldFencingTombstoneTTL)
 		if err != nil {
 			return nil, err
 		}
 		if c.tombstoneTTL, err = parseTTL(ttlStr); err != nil {
-			return nil, fmt.Errorf("field '%v.%v': %w", asFieldFencing, asFieldFencingTombstoneTTL, err)
+			return nil, fmt.Errorf("field '%v.%v': %w", aoFieldFencing, aoFieldFencingTombstoneTTL, err)
 		}
 	}
 	if c.fenceEnabled {
 		if err := validateBinName(c.fenceBin); err != nil {
-			return nil, fmt.Errorf("field '%v.%v': %w", asFieldFencing, asFieldFencingBin, err)
+			return nil, fmt.Errorf("field '%v.%v': %w", aoFieldFencing, aoFieldFencingBin, err)
 		}
 		if err := validateBinName(c.tombstoneBin); err != nil {
-			return nil, fmt.Errorf("field '%v.%v': %w", asFieldFencing, asFieldFencingTombstoneBin, err)
+			return nil, fmt.Errorf("field '%v.%v': %w", aoFieldFencing, aoFieldFencingTombstoneBin, err)
 		}
 		if c.tombstoneBin == c.fenceBin {
-			return nil, fmt.Errorf("field '%v.%v' must not be the same as '%v.%v'", asFieldFencing, asFieldFencingTombstoneBin, asFieldFencing, asFieldFencingBin)
+			return nil, fmt.Errorf("field '%v.%v' must not be the same as '%v.%v'", aoFieldFencing, aoFieldFencingTombstoneBin, aoFieldFencing, aoFieldFencingBin)
 		}
 	}
 
-	sendKey, err := conf.FieldBool(asFieldSendKey)
+	sendKey, err := conf.FieldBool(aoFieldSendKey)
 	if err != nil {
 		return nil, err
 	}
-	durableDelete, err := conf.FieldBool(asFieldDurableDelete)
+	durableDelete, err := conf.FieldBool(aoFieldDurableDelete)
 	if err != nil {
 		return nil, err
 	}
@@ -559,13 +559,13 @@ func parseOutputConfig(conf *service.ParsedConfig) (*aerospikeConfig, error) {
 	c.deletePolicy.SendKey = sendKey
 	c.deletePolicy.DurableDelete = durableDelete
 
-	commitStr, err := conf.FieldString(asFieldCommitLevel)
+	commitStr, err := conf.FieldString(aoFieldCommitLevel)
 	if err != nil {
 		return nil, err
 	}
 	commit, err := parseCommitLevel(commitStr)
 	if err != nil {
-		return nil, fmt.Errorf("field '%v': %w", asFieldCommitLevel, err)
+		return nil, fmt.Errorf("field '%v': %w", aoFieldCommitLevel, err)
 	}
 	c.writePolicy.CommitLevel = commit
 	c.deletePolicy.CommitLevel = commit

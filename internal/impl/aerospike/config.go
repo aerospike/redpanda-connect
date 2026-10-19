@@ -16,7 +16,7 @@ package aerospike
 
 // Configuration field names shared by more than one Aerospike component.
 const (
-	asFieldBins = "bins"
+	aoFieldBins = "bins"
 )
 
 // nonNegativeLint rejects negative integers in config fields that must be >= 0.

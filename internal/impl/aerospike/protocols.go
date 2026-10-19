@@ -37,7 +37,7 @@ func applyTLSProtocols(cfg *tls.Config, names []string) error {
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
-			return fmt.Errorf("field '%s' contains an empty protocol name", asFieldProtocols)
+			return fmt.Errorf("field '%s' contains an empty protocol name", aoFieldProtocols)
 		}
 		switch strings.ToUpper(name) {
 		case protocolTLS12:
@@ -45,7 +45,7 @@ func applyTLSProtocols(cfg *tls.Config, names []string) error {
 		case protocolTLS13:
 			want13 = true
 		default:
-			return fmt.Errorf("field '%s': unknown protocol %q; supported values are TLSv1.2 and TLSv1.3", asFieldProtocols, name)
+			return fmt.Errorf("field '%s': unknown protocol %q; supported values are TLSv1.2 and TLSv1.3", aoFieldProtocols, name)
 		}
 	}
 	switch {
