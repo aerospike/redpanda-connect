@@ -31,23 +31,24 @@ import (
 
 // Configuration field names shared by every Aerospike component.
 const (
-	fieldHosts                = "hosts"
-	fieldClusterName          = "cluster_name"
-	fieldUseServicesAlternate = "use_services_alternate"
-	fieldConnectTimeout       = "connect_timeout"
-	fieldMaxConnsPerNode      = "max_connections_per_node"
-	fieldMinConnsPerNode      = "min_connections_per_node"
-	fieldWarmUp               = "warm_up"
-	fieldMaxErrorRate         = "max_error_rate"
-	fieldErrorRateWindow      = "error_rate_window"
-	fieldCredentials          = "credentials"
-	fieldCredentialsUsername  = "username"
-	fieldCredentialsPassword  = "password"
-	fieldTLS                  = "tls"
-	fieldCiphers              = "ciphers"
-	fieldProtocols            = "protocols"
-	fieldRevokeCertificates   = "revoke_certificates"
-	fieldAuthMode             = "auth_mode"
+	fieldHosts                   = "hosts"
+	fieldClusterName             = "cluster_name"
+	fieldUseServicesAlternate    = "use_services_alternate"
+	fieldConnectTimeout          = "connect_timeout"
+	fieldMaxConnsPerNode         = "max_connections_per_node"
+	fieldMinConnsPerNode         = "min_connections_per_node"
+	fieldWarmUp                  = "warm_up"
+	fieldMaxErrorRate            = "max_error_rate"
+	fieldErrorRateWindow         = "error_rate_window"
+	fieldCredentials             = "credentials"
+	fieldCredentialsUsername     = "username"
+	fieldCredentialsPassword     = "password"
+	fieldCredentialsPasswordFile = "password_file"
+	fieldTLS                     = "tls"
+	fieldCiphers                 = "ciphers"
+	fieldProtocols               = "protocols"
+	fieldRevokeCertificates      = "revoke_certificates"
+	fieldAuthMode                = "auth_mode"
 
 	// defaultServicePort is the Aerospike client service port.
 	defaultServicePort = 3000
@@ -112,9 +113,15 @@ func clientFields() []*service.ConfigField {
 				Description("Username for Aerospike access control.").
 				Default(""),
 			service.NewStringField(fieldCredentialsPassword).
-				Description("Password for Aerospike access control.").
+				Description("Password for Aerospike access control. Set this or `password_file`, not both.").
 				Default("").
 				Secret(),
+			service.NewStringField(fieldCredentialsPasswordFile).
+				Description("File whose first line is the Aerospike password. This is the kafka-inbound `credentials.password-file` path. The file is read once at startup, so a rotated password is picked up on the next restart. A trailing newline is not part of the password. Trailing spaces on the first line are kept. An empty first line fails startup. Set this or `password`, not both. A username with neither also fails startup. `pki` ignores this field. A missing or unreadable file fails startup. The file contents are not logged.").
+				Default("").
+				Example("/var/secrets/aerospike-password").
+				Version("4.114.0").
+				Advanced(),
 		).Description("Credentials for clusters with access control enabled. Aerospike Community Edition has no authentication; leave empty there.").
 			Optional().
 			Advanced(),
@@ -154,10 +161,11 @@ func clientFields() []*service.ConfigField {
 
 // clientConfig is the parsed connection configuration.
 type clientConfig struct {
-	Hosts           []*as.Host
-	Policy          *as.ClientPolicy
-	WarmUp          bool
-	insecureCiphers []string
+	Hosts               []*as.Host
+	Policy              *as.ClientPolicy
+	WarmUp              bool
+	insecureCiphers     []string
+	ignoredPasswordFile bool
 }
 
 // sizePoolForConcurrency gives the connection pool a floor matching the number
@@ -239,6 +247,7 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 		return nil, fmt.Errorf("field '%v' must not be negative", fieldErrorRateWindow)
 	}
 
+	var passwordFile string
 	if conf.Contains(fieldCredentials) {
 		cc := conf.Namespace(fieldCredentials)
 		if c.Policy.User, err = cc.FieldString(fieldCredentialsUsername); err != nil {
@@ -247,6 +256,10 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 		if c.Policy.Password, err = cc.FieldString(fieldCredentialsPassword); err != nil {
 			return nil, err
 		}
+		if passwordFile, err = cc.FieldString(fieldCredentialsPasswordFile); err != nil {
+			return nil, err
+		}
+		passwordFile = strings.TrimSpace(passwordFile)
 	}
 
 	mode, err := conf.FieldString(fieldAuthMode)
@@ -263,6 +276,11 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 	default:
 		return nil, fmt.Errorf("field '%v': unknown auth mode %q", fieldAuthMode, mode)
 	}
+	ignoredPasswordFile, err := applyPasswordFile(c.Policy, passwordFile)
+	if err != nil {
+		return nil, err
+	}
+	c.ignoredPasswordFile = ignoredPasswordFile
 
 	var tlsConf *tls.Config
 	var tlsEnabled bool
@@ -451,6 +469,8 @@ type connection struct {
 
 	mu     sync.RWMutex
 	client *as.Client
+
+	warnedIgnoredPassword bool
 }
 
 // newConnection returns an unconnected handle. Call connect before issuing commands.
@@ -473,6 +493,10 @@ func (c *connection) connect(ctx context.Context) error {
 	if c.client != nil {
 		c.client.Close()
 		c.client = nil
+	}
+	if c.conf.ignoredPasswordFile && c.log != nil && !c.warnedIgnoredPassword {
+		c.log.Warnf("field '%s.%s' is ignored when '%s' is pki", fieldCredentials, fieldCredentialsPasswordFile, fieldAuthMode)
+		c.warnedIgnoredPassword = true
 	}
 
 	policy := c.conf.Policy
