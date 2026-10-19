@@ -108,6 +108,52 @@ func TestTLSProtocolCap(t *testing.T) {
 	})
 }
 
+// The handshake certificate uses serial 2. The CA that signed it uses serial 1.
+func TestRevokeCertificates(t *testing.T) {
+	const tls12Suite = "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+	caPEM, serverCert := cipherHandshakeCert(t)
+
+	t.Run("listed peer serial fails", func(t *testing.T) {
+		cfg := inboundTLS(t, caPEM, "", nil, []string{"2"})
+		_, clientErr, serverErr := handshake(t, serverCert, tls12Suite, cfg)
+		require.Error(t, clientErr)
+		require.Error(t, serverErr)
+		assert.Contains(t, clientErr.Error(), "serial 2 is revoked")
+	})
+
+	t.Run("listed ca serial fails", func(t *testing.T) {
+		cfg := inboundTLS(t, caPEM, "", nil, []string{"1"})
+		_, clientErr, serverErr := handshake(t, serverCert, tls12Suite, cfg)
+		require.Error(t, clientErr)
+		require.Error(t, serverErr)
+		assert.Contains(t, clientErr.Error(), "serial 1 is revoked")
+	})
+
+	t.Run("hex serial matches the peer", func(t *testing.T) {
+		cfg := inboundTLS(t, caPEM, "", nil, []string{"0x2"})
+		_, clientErr, serverErr := handshake(t, serverCert, tls12Suite, cfg)
+		require.Error(t, clientErr)
+		require.Error(t, serverErr)
+		assert.Contains(t, clientErr.Error(), "serial 2 is revoked")
+	})
+
+	t.Run("skip cert verify does not see the ca", func(t *testing.T) {
+		cfg := inboundTLS(t, caPEM, "", nil, []string{"1"})
+		cfg.InsecureSkipVerify = true
+		_, clientErr, serverErr := handshake(t, serverCert, tls12Suite, cfg)
+		require.NoError(t, serverErr)
+		require.NoError(t, clientErr)
+	})
+
+	t.Run("other serial still connects", func(t *testing.T) {
+		cfg := inboundTLS(t, caPEM, "", nil, []string{"99"})
+		state, clientErr, serverErr := handshake(t, serverCert, tls12Suite, cfg)
+		require.NoError(t, serverErr)
+		require.NoError(t, clientErr)
+		assert.Equal(t, uint16(tls.VersionTLS12), state.Version)
+	})
+}
+
 // handshake runs the parsed inbound tls.Config against a TLS 1.2 listener that
 // allows only serverSuite. Both sides stay open until each handshake returns.
 func handshake(t *testing.T, cert tls.Certificate, serverSuite string, clientCfg *tls.Config) (tls.ConnectionState, error, error) {
@@ -163,6 +209,11 @@ func handshakeAt(t *testing.T, cert tls.Certificate, serverSuite string, clientC
 
 func clientTLSConfig(t *testing.T, caPEM []byte, suite string, protocols ...string) *tls.Config {
 	t.Helper()
+	return inboundTLS(t, caPEM, suite, protocols, nil)
+}
+
+func inboundTLS(t *testing.T, caPEM []byte, suite string, protocols, revoked []string) *tls.Config {
+	t.Helper()
 	var yaml strings.Builder
 	yaml.WriteString("hosts: [\"127.0.0.1:1\"]\n")
 	yaml.WriteString("tls:\n  enabled: true\n  root_cas: |\n")
@@ -184,6 +235,18 @@ func clientTLSConfig(t *testing.T, caPEM []byte, suite string, protocols ...stri
 			}
 			yaml.WriteByte('"')
 			yaml.WriteString(protocol)
+			yaml.WriteByte('"')
+		}
+		yaml.WriteString("]\n")
+	}
+	if len(revoked) > 0 {
+		yaml.WriteString("revoke_certificates: [")
+		for i, serial := range revoked {
+			if i > 0 {
+				yaml.WriteString(", ")
+			}
+			yaml.WriteByte('"')
+			yaml.WriteString(serial)
 			yaml.WriteByte('"')
 		}
 		yaml.WriteString("]\n")
