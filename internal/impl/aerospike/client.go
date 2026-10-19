@@ -44,6 +44,7 @@ const (
 	fieldCredentialsUsername  = "username"
 	fieldCredentialsPassword  = "password"
 	fieldTLS                  = "tls"
+	fieldCiphers              = "ciphers"
 	fieldAuthMode             = "auth_mode"
 
 	// defaultServicePort is the Aerospike client service port.
@@ -126,14 +127,21 @@ func clientFields() []*service.ConfigField {
 			Advanced(),
 
 		service.NewTLSToggledField(fieldTLS),
+
+		service.NewStringListField(fieldCiphers).
+			Description("TLS 1.2 cipher suites to offer, as IANA names such as `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. Empty leaves the suites selected by `tls`. Names are matched without case, and a name Go does not implement is rejected at startup. A suite Go marks insecure is accepted when it is named, so the list can match a server that still requires it, and startup logs a warning for each one. TLS 1.3 suites are always offered by the Go runtime and cannot be named here. Requires `tls.enabled`.").
+			Default([]string{}).
+			Example([]string{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}).
+			Advanced(),
 	}
 }
 
 // clientConfig is the parsed connection configuration.
 type clientConfig struct {
-	Hosts  []*as.Host
-	Policy *as.ClientPolicy
-	WarmUp bool
+	Hosts           []*as.Host
+	Policy          *as.ClientPolicy
+	WarmUp          bool
+	insecureCiphers []string
 }
 
 // sizePoolForConcurrency gives the connection pool a floor matching the number
@@ -245,7 +253,22 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 	if tlsConf, tlsEnabled, err = conf.FieldTLSToggled(fieldTLS); err != nil {
 		return nil, err
 	}
+	cipherNames, err := conf.FieldStringList(fieldCiphers)
+	if err != nil {
+		return nil, err
+	}
+	if len(cipherNames) > 0 && !tlsEnabled {
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldCiphers, fieldTLS)
+	}
 	if tlsEnabled {
+		suites, err := cipherSuiteIDs(cipherNames)
+		if err != nil {
+			return nil, err
+		}
+		if len(suites) > 0 {
+			tlsConf.CipherSuites = suites
+			c.insecureCiphers = insecureCipherNames(suites)
+		}
 		c.Policy.TlsConfig = tlsConf
 	}
 
