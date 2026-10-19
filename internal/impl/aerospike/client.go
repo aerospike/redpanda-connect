@@ -46,6 +46,7 @@ const (
 	fieldTLS                  = "tls"
 	fieldCiphers              = "ciphers"
 	fieldProtocols            = "protocols"
+	fieldRevokeCertificates   = "revoke_certificates"
 	fieldAuthMode             = "auth_mode"
 
 	// defaultServicePort is the Aerospike client service port.
@@ -139,6 +140,13 @@ func clientFields() []*service.ConfigField {
 			Description("TLS versions to offer. `TLSv1.2` does not offer TLS 1.3. `TLSv1.3` does not offer TLS 1.2. Empty, or both names, leaves the versions selected by `tls`: TLS 1.2 and TLS 1.3. Names are matched case-insensitively. `ciphers` fails startup when this list offers TLS 1.3 only. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"TLSv1.2"}).
+			Version("4.114.0").
+			Advanced(),
+
+		service.NewStringListField(fieldRevokeCertificates).
+			Description("Certificate serial numbers to reject. A value is a decimal integer, or a hex integer with a `0x` prefix. `openssl x509 -noout -serial` prints hex, so convert that to decimal or add the `0x` prefix. A hex value without the prefix is read as decimal when it contains only digits. A serial is unique only for its issuing CA, and the same number on any other certificate in the verified chain, including a root or intermediate, is also rejected. With `tls.skip_cert_verify`, only certificates the server sends are checked, so a root the server does not send is not seen. An empty list leaves the CA check as the only certificate check. A serial may be larger than a 64-bit integer. Requires `tls.enabled`.").
+			Default([]string{}).
+			Example([]string{"123123", "0x1E0F3"}).
 			Version("4.114.0").
 			Advanced(),
 	}
@@ -275,6 +283,13 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 	if len(protocolNames) > 0 && !tlsEnabled {
 		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldProtocols, fieldTLS)
 	}
+	revokedNames, err := conf.FieldStringList(fieldRevokeCertificates)
+	if err != nil {
+		return nil, err
+	}
+	if len(revokedNames) > 0 && !tlsEnabled {
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldRevokeCertificates, fieldTLS)
+	}
 	if tlsEnabled {
 		if err := applyTLSProtocols(tlsConf, protocolNames); err != nil {
 			return nil, err
@@ -289,6 +304,9 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 		if len(suites) > 0 {
 			tlsConf.CipherSuites = suites
 			c.insecureCiphers = insecureCipherNames(suites)
+		}
+		if err := applyRevokedCertificates(tlsConf, revokedNames); err != nil {
+			return nil, err
 		}
 		c.Policy.TlsConfig = tlsConf
 	}

@@ -18,8 +18,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"log/slog"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -374,6 +376,116 @@ ciphers: ["TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"]
 `)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "TLS 1.3 only")
+	})
+}
+
+func TestParseRevokeCertificates(t *testing.T) {
+	t.Run("empty leaves the ca check alone", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+`)
+		require.NoError(t, err)
+		assert.Nil(t, c.Policy.TlsConfig.VerifyPeerCertificate)
+	})
+
+	t.Run("listed serial rejects that certificate", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+revoke_certificates: ["02", "2", "9223372036854775808"]
+`)
+		require.NoError(t, err)
+		require.NotNil(t, c.Policy.TlsConfig.VerifyPeerCertificate)
+		err = c.Policy.TlsConfig.VerifyPeerCertificate(nil, [][]*x509.Certificate{{
+			{SerialNumber: big.NewInt(2)},
+		}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serial 2 is revoked")
+
+		large, ok := new(big.Int).SetString("9223372036854775808", 10)
+		require.True(t, ok)
+		err = c.Policy.TlsConfig.VerifyPeerCertificate(nil, [][]*x509.Certificate{{
+			{SerialNumber: large},
+		}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serial 9223372036854775808 is revoked")
+
+		require.NoError(t, c.Policy.TlsConfig.VerifyPeerCertificate(nil, [][]*x509.Certificate{{
+			{SerialNumber: big.NewInt(99)},
+		}}))
+	})
+
+	t.Run("chain serial is rejected", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+revoke_certificates: ["1"]
+`)
+		require.NoError(t, err)
+		err = c.Policy.TlsConfig.VerifyPeerCertificate(nil, [][]*x509.Certificate{{
+			{SerialNumber: big.NewInt(2)},
+			{SerialNumber: big.NewInt(1)},
+		}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serial 1 is revoked")
+	})
+
+	t.Run("hex prefix is accepted", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+revoke_certificates: ["0x10", "16", "0x1E240"]
+`)
+		require.NoError(t, err)
+		err = c.Policy.TlsConfig.VerifyPeerCertificate(nil, [][]*x509.Certificate{{
+			{SerialNumber: big.NewInt(16)},
+		}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serial 16 is revoked")
+
+		hexSerial, ok := new(big.Int).SetString("1E240", 16)
+		require.True(t, ok)
+		err = c.Policy.TlsConfig.VerifyPeerCertificate(nil, [][]*x509.Certificate{{
+			{SerialNumber: hexSerial},
+		}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serial 123456 is revoked")
+	})
+
+	t.Run("hex without a prefix is rejected", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+revoke_certificates: ["12ab"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `serial "12ab"`)
+	})
+
+	t.Run("empty serial", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+revoke_certificates: [" "]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty serial number")
+	})
+
+	t.Run("requires tls", func(t *testing.T) {
+		_, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+revoke_certificates: ["2"]
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "requires 'tls.enabled'")
 	})
 }
 
