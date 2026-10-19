@@ -31,24 +31,24 @@ import (
 
 // Configuration field names shared by every Aerospike component.
 const (
-	fieldHosts                   = "hosts"
-	fieldClusterName             = "cluster_name"
-	fieldUseServicesAlternate    = "use_services_alternate"
-	fieldConnectTimeout          = "connect_timeout"
-	fieldMaxConnsPerNode         = "max_connections_per_node"
-	fieldMinConnsPerNode         = "min_connections_per_node"
-	fieldWarmUp                  = "warm_up"
-	fieldMaxErrorRate            = "max_error_rate"
-	fieldErrorRateWindow         = "error_rate_window"
-	fieldCredentials             = "credentials"
-	fieldCredentialsUsername     = "username"
-	fieldCredentialsPassword     = "password"
-	fieldCredentialsPasswordFile = "password_file"
-	fieldTLS                     = "tls"
-	fieldCiphers                 = "ciphers"
-	fieldProtocols               = "protocols"
-	fieldRevokeCertificates      = "revoke_certificates"
-	fieldAuthMode                = "auth_mode"
+	aoFieldHosts                   = "hosts"
+	aoFieldClusterName             = "cluster_name"
+	aoFieldUseServicesAlternate    = "use_services_alternate"
+	aoFieldConnectTimeout          = "connect_timeout"
+	aoFieldMaxConnsPerNode         = "max_connections_per_node"
+	aoFieldMinConnsPerNode         = "min_connections_per_node"
+	aoFieldWarmUp                  = "warm_up"
+	aoFieldMaxErrorRate            = "max_error_rate"
+	aoFieldErrorRateWindow         = "error_rate_window"
+	aoFieldCredentials             = "credentials"
+	aoFieldCredentialsUsername     = "username"
+	aoFieldCredentialsPassword     = "password"
+	aoFieldCredentialsPasswordFile = "password_file"
+	aoFieldTLS                     = "tls"
+	aoFieldCiphers                 = "ciphers"
+	aoFieldProtocols               = "protocols"
+	aoFieldRevokeCertificates      = "revoke_certificates"
+	aoFieldAuthMode                = "auth_mode"
 
 	// defaultServicePort is the Aerospike client service port.
 	defaultServicePort = 3000
@@ -58,75 +58,75 @@ const (
 // Aerospike component.
 func clientFields() []*service.ConfigField {
 	return []*service.ConfigField{
-		service.NewStringListField(fieldHosts).
+		service.NewStringListField(aoFieldHosts).
 			Description("Seed nodes as `host`, `host:port`, `host:tlsname:port`, or `[ipv6]:tlsname:port`. Port defaults to 3000. The tlsname is the certificate name used for TLS verification and is required against a conventionally secured cluster. The client discovers and connects directly to every node, so all nodes must be reachable from this process — a load balancer in front of the seeds is not sufficient.").
 			Example([]string{"localhost:3000"}).
 			Example([]string{"as1.internal:clusterA:3000"}).
 			Example([]string{"as1.internal:3000", "as2.internal:3000"}),
 
-		service.NewStringField(fieldClusterName).
+		service.NewStringField(aoFieldClusterName).
 			Description("Expected cluster name. When set, the client refuses to talk to nodes reporting a different name.").
 			Default("").
 			Advanced(),
 
-		service.NewBoolField(fieldUseServicesAlternate).
+		service.NewBoolField(aoFieldUseServicesAlternate).
 			Description("Use the nodes' `alternate-access-address` instead of `access-address`. Required when this process reaches Aerospike over a different network than the one the nodes advertise, which is the usual case for Kubernetes and NAT deployments.").
 			Default(false).
 			Advanced(),
 
-		service.NewDurationField(fieldConnectTimeout).
+		service.NewDurationField(aoFieldConnectTimeout).
 			Description("Timeout for establishing the initial cluster connection. Capped by the remaining pipeline context deadline when one is set, so a shutdown mid-connect does not wait the full duration.").
 			Default("30s").
 			Advanced(),
 
-		service.NewIntField(fieldMaxConnsPerNode).
+		service.NewIntField(aoFieldMaxConnsPerNode).
 			Description("Maximum size of the client connection pool per cluster node. The client opens connections to every node, so budget `max_connections_per_node` multiplied by the number of processes against the server's `proto-fd-max`.").
 			Default(100).
 			LintRule(positiveLint).
 			Advanced(),
 
-		service.NewIntField(fieldMinConnsPerNode).
+		service.NewIntField(aoFieldMinConnsPerNode).
 			Description("Number of connections per node to keep open even while idle, so a burst after a quiet period does not pay reconnect cost. This is also how many connections `warm_up` opens. `0` sizes the pool automatically from the concurrency the component can reach, which is what keeps commands from failing while the pool is still filling. Set it explicitly only to override that: every connection is a file descriptor on the node, and with TLS a large pool makes startup and reconnect expensive in server CPU.").
 			Default(0).
 			LintRule(nonNegativeLint).
 			Advanced(),
 
-		service.NewBoolField(fieldWarmUp).
+		service.NewBoolField(aoFieldWarmUp).
 			Description("Open `min_connections_per_node` connections on startup rather than lazily, which avoids a latency spike and possible timeouts on the first commands. Disabling this leaves the pool to fill on demand, which with `max_retries` at `0` fails the commands that find it empty.").
 			Default(true).
 			Advanced(),
 
-		service.NewIntField(fieldMaxErrorRate).
+		service.NewIntField(aoFieldMaxErrorRate).
 			Description("Errors permitted from a single node per `error_rate_window` before the client stops sending it commands and fails fast instead. This is a circuit breaker: it stops a pipeline from hammering a node that is already failing. `0` disables it.").
 			Default(100).
 			LintRule(nonNegativeLint).
 			Advanced(),
 
-		service.NewIntField(fieldErrorRateWindow).
+		service.NewIntField(aoFieldErrorRateWindow).
 			Description("Number of cluster tend iterations that make up the window for `max_error_rate`.").
 			Default(1).
 			LintRule(nonNegativeLint).
 			Advanced(),
 
-		service.NewObjectField(fieldCredentials,
-			service.NewStringField(fieldCredentialsUsername).
+		service.NewObjectField(aoFieldCredentials,
+			service.NewStringField(aoFieldCredentialsUsername).
 				Description("Username for Aerospike access control.").
 				Default(""),
-			service.NewStringField(fieldCredentialsPassword).
+			service.NewStringField(aoFieldCredentialsPassword).
 				Description("Password for Aerospike access control. Set this or `password_file`, not both.").
 				Default("").
 				Secret(),
-			service.NewStringField(fieldCredentialsPasswordFile).
+			service.NewStringField(aoFieldCredentialsPasswordFile).
 				Description("File whose first line is the Aerospike password. This is the kafka-inbound `credentials.password-file` path. The file is read once at startup, so a rotated password is picked up on the next restart. A trailing newline is not part of the password. Trailing spaces on the first line are kept. An empty first line fails startup. Set this or `password`, not both. A username with neither also fails startup. `pki` ignores this field. A missing or unreadable file fails startup. The file contents are not logged.").
 				Default("").
 				Example("/var/secrets/aerospike-password").
-				Version("4.114.0").
+				Version("4.115.0").
 				Advanced(),
 		).Description("Credentials for clusters with access control enabled. Aerospike Community Edition has no authentication; leave empty there.").
 			Optional().
 			Advanced(),
 
-		service.NewStringAnnotatedEnumField(fieldAuthMode, map[string]string{
+		service.NewStringAnnotatedEnumField(aoFieldAuthMode, map[string]string{
 			"internal": "Hashed password stored on the server. Default.",
 			"external": "External authentication such as LDAP. Requires TLS.",
 			"pki":      "Certificate authentication. Requires TLS and a client certificate; do not set a password.",
@@ -135,26 +135,26 @@ func clientFields() []*service.ConfigField {
 			Default("internal").
 			Advanced(),
 
-		service.NewTLSToggledField(fieldTLS),
+		service.NewTLSToggledField(aoFieldTLS),
 
-		service.NewStringListField(fieldCiphers).
+		service.NewStringListField(aoFieldCiphers).
 			Description("TLS 1.2 cipher suites to offer, as IANA names such as `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. Empty leaves the suites selected by `tls`. Names are matched case-insensitively, and a name Go does not implement is rejected at startup. A suite Go marks insecure is accepted when it is named, so the list can match a server that still requires it, and startup logs a warning for each one. TLS 1.3 suites cannot be named here. They stay offered unless `protocols` is `TLSv1.2`. Naming `ciphers` when `protocols` offers TLS 1.3 only fails startup. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}).
 			Advanced(),
 
-		service.NewStringListField(fieldProtocols).
+		service.NewStringListField(aoFieldProtocols).
 			Description("TLS versions to offer. `TLSv1.2` does not offer TLS 1.3. `TLSv1.3` does not offer TLS 1.2. Empty, or both names, leaves the versions selected by `tls`: TLS 1.2 and TLS 1.3. Names are matched case-insensitively. `ciphers` fails startup when this list offers TLS 1.3 only. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"TLSv1.2"}).
-			Version("4.114.0").
+			Version("4.115.0").
 			Advanced(),
 
-		service.NewStringListField(fieldRevokeCertificates).
+		service.NewStringListField(aoFieldRevokeCertificates).
 			Description("Certificate serial numbers to reject. A value is a decimal integer, or a hex integer with a `0x` prefix. `openssl x509 -noout -serial` prints hex, so convert that to decimal or add the `0x` prefix. A hex value without the prefix is read as decimal when it contains only digits. A serial is unique only for its issuing CA, and the same number on any other certificate in the verified chain, including a root or intermediate, is also rejected. With `tls.skip_cert_verify`, only certificates the server sends are checked, so a root the server does not send is not seen. An empty list leaves the CA check as the only certificate check. A serial may be larger than a 64-bit integer. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"123123", "0x1E0F3"}).
-			Version("4.114.0").
+			Version("4.115.0").
 			Advanced(),
 	}
 }
@@ -188,12 +188,12 @@ func (c *clientConfig) sizePoolForConcurrency(concurrency int) {
 
 // parseClientConfig reads the fields produced by clientFields.
 func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
-	hostStrs, err := conf.FieldStringList(fieldHosts)
+	hostStrs, err := conf.FieldStringList(aoFieldHosts)
 	if err != nil {
 		return nil, err
 	}
 	if len(hostStrs) == 0 {
-		return nil, fmt.Errorf("field '%v' must contain at least one seed node", fieldHosts)
+		return nil, fmt.Errorf("field '%v' must contain at least one seed node", aoFieldHosts)
 	}
 
 	c := &clientConfig{Policy: as.NewClientPolicy()}
@@ -205,64 +205,64 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 		c.Hosts = append(c.Hosts, host)
 	}
 
-	if c.Policy.ClusterName, err = conf.FieldString(fieldClusterName); err != nil {
+	if c.Policy.ClusterName, err = conf.FieldString(aoFieldClusterName); err != nil {
 		return nil, err
 	}
-	if c.Policy.UseServicesAlternate, err = conf.FieldBool(fieldUseServicesAlternate); err != nil {
+	if c.Policy.UseServicesAlternate, err = conf.FieldBool(aoFieldUseServicesAlternate); err != nil {
 		return nil, err
 	}
-	if c.Policy.Timeout, err = conf.FieldDuration(fieldConnectTimeout); err != nil {
+	if c.Policy.Timeout, err = conf.FieldDuration(aoFieldConnectTimeout); err != nil {
 		return nil, err
 	}
-	if c.Policy.ConnectionQueueSize, err = conf.FieldInt(fieldMaxConnsPerNode); err != nil {
+	if c.Policy.ConnectionQueueSize, err = conf.FieldInt(aoFieldMaxConnsPerNode); err != nil {
 		return nil, err
 	}
 	if c.Policy.ConnectionQueueSize < 1 {
-		return nil, fmt.Errorf("field '%v' must be at least 1", fieldMaxConnsPerNode)
+		return nil, fmt.Errorf("field '%v' must be at least 1", aoFieldMaxConnsPerNode)
 	}
-	if c.Policy.MinConnectionsPerNode, err = conf.FieldInt(fieldMinConnsPerNode); err != nil {
+	if c.Policy.MinConnectionsPerNode, err = conf.FieldInt(aoFieldMinConnsPerNode); err != nil {
 		return nil, err
 	}
 	if c.Policy.MinConnectionsPerNode < 0 {
-		return nil, fmt.Errorf("field '%v' must not be negative", fieldMinConnsPerNode)
+		return nil, fmt.Errorf("field '%v' must not be negative", aoFieldMinConnsPerNode)
 	}
 	if c.Policy.MinConnectionsPerNode > c.Policy.ConnectionQueueSize {
 		return nil, fmt.Errorf("field '%v' (%d) must not exceed '%v' (%d)",
-			fieldMinConnsPerNode, c.Policy.MinConnectionsPerNode,
-			fieldMaxConnsPerNode, c.Policy.ConnectionQueueSize)
+			aoFieldMinConnsPerNode, c.Policy.MinConnectionsPerNode,
+			aoFieldMaxConnsPerNode, c.Policy.ConnectionQueueSize)
 	}
-	if c.WarmUp, err = conf.FieldBool(fieldWarmUp); err != nil {
+	if c.WarmUp, err = conf.FieldBool(aoFieldWarmUp); err != nil {
 		return nil, err
 	}
-	if c.Policy.MaxErrorRate, err = conf.FieldInt(fieldMaxErrorRate); err != nil {
+	if c.Policy.MaxErrorRate, err = conf.FieldInt(aoFieldMaxErrorRate); err != nil {
 		return nil, err
 	}
 	if c.Policy.MaxErrorRate < 0 {
-		return nil, fmt.Errorf("field '%v' must not be negative", fieldMaxErrorRate)
+		return nil, fmt.Errorf("field '%v' must not be negative", aoFieldMaxErrorRate)
 	}
-	if c.Policy.ErrorRateWindow, err = conf.FieldInt(fieldErrorRateWindow); err != nil {
+	if c.Policy.ErrorRateWindow, err = conf.FieldInt(aoFieldErrorRateWindow); err != nil {
 		return nil, err
 	}
 	if c.Policy.ErrorRateWindow < 0 {
-		return nil, fmt.Errorf("field '%v' must not be negative", fieldErrorRateWindow)
+		return nil, fmt.Errorf("field '%v' must not be negative", aoFieldErrorRateWindow)
 	}
 
 	var passwordFile string
-	if conf.Contains(fieldCredentials) {
-		cc := conf.Namespace(fieldCredentials)
-		if c.Policy.User, err = cc.FieldString(fieldCredentialsUsername); err != nil {
+	if conf.Contains(aoFieldCredentials) {
+		cc := conf.Namespace(aoFieldCredentials)
+		if c.Policy.User, err = cc.FieldString(aoFieldCredentialsUsername); err != nil {
 			return nil, err
 		}
-		if c.Policy.Password, err = cc.FieldString(fieldCredentialsPassword); err != nil {
+		if c.Policy.Password, err = cc.FieldString(aoFieldCredentialsPassword); err != nil {
 			return nil, err
 		}
-		if passwordFile, err = cc.FieldString(fieldCredentialsPasswordFile); err != nil {
+		if passwordFile, err = cc.FieldString(aoFieldCredentialsPasswordFile); err != nil {
 			return nil, err
 		}
 		passwordFile = strings.TrimSpace(passwordFile)
 	}
 
-	mode, err := conf.FieldString(fieldAuthMode)
+	mode, err := conf.FieldString(aoFieldAuthMode)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +274,7 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 	case "pki":
 		c.Policy.AuthMode = as.AuthModePKI
 	default:
-		return nil, fmt.Errorf("field '%v': unknown auth mode %q", fieldAuthMode, mode)
+		return nil, fmt.Errorf("field '%v': unknown auth mode %q", aoFieldAuthMode, mode)
 	}
 	ignoredPasswordFile, err := applyPasswordFile(c.Policy, passwordFile)
 	if err != nil {
@@ -284,36 +284,36 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 
 	var tlsConf *tls.Config
 	var tlsEnabled bool
-	if tlsConf, tlsEnabled, err = conf.FieldTLSToggled(fieldTLS); err != nil {
+	if tlsConf, tlsEnabled, err = conf.FieldTLSToggled(aoFieldTLS); err != nil {
 		return nil, err
 	}
-	cipherNames, err := conf.FieldStringList(fieldCiphers)
+	cipherNames, err := conf.FieldStringList(aoFieldCiphers)
 	if err != nil {
 		return nil, err
 	}
 	if len(cipherNames) > 0 && !tlsEnabled {
-		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldCiphers, fieldTLS)
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", aoFieldCiphers, aoFieldTLS)
 	}
-	protocolNames, err := conf.FieldStringList(fieldProtocols)
+	protocolNames, err := conf.FieldStringList(aoFieldProtocols)
 	if err != nil {
 		return nil, err
 	}
 	if len(protocolNames) > 0 && !tlsEnabled {
-		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldProtocols, fieldTLS)
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", aoFieldProtocols, aoFieldTLS)
 	}
-	revokedNames, err := conf.FieldStringList(fieldRevokeCertificates)
+	revokedNames, err := conf.FieldStringList(aoFieldRevokeCertificates)
 	if err != nil {
 		return nil, err
 	}
 	if len(revokedNames) > 0 && !tlsEnabled {
-		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", fieldRevokeCertificates, fieldTLS)
+		return nil, fmt.Errorf("field '%s' requires '%s.enabled'", aoFieldRevokeCertificates, aoFieldTLS)
 	}
 	if tlsEnabled {
 		if err := applyTLSProtocols(tlsConf, protocolNames); err != nil {
 			return nil, err
 		}
 		if len(cipherNames) > 0 && tlsConf.MinVersion >= tls.VersionTLS13 {
-			return nil, fmt.Errorf("field '%s': TLS 1.2 cipher suites have no effect when '%s' offers TLS 1.3 only", fieldCiphers, fieldProtocols)
+			return nil, fmt.Errorf("field '%s': TLS 1.2 cipher suites have no effect when '%s' offers TLS 1.3 only", aoFieldCiphers, aoFieldProtocols)
 		}
 		suites, err := cipherSuiteIDs(cipherNames)
 		if err != nil {
@@ -345,7 +345,7 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 func parseHost(s string) (*as.Host, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return nil, fmt.Errorf("empty host entry in '%v'", fieldHosts)
+		return nil, fmt.Errorf("empty host entry in '%v'", aoFieldHosts)
 	}
 
 	name, rest, err := splitHostName(s)
@@ -495,7 +495,7 @@ func (c *connection) connect(ctx context.Context) error {
 		c.client = nil
 	}
 	if c.conf.ignoredPasswordFile && c.log != nil && !c.warnedIgnoredPassword {
-		c.log.Warnf("field '%s.%s' is ignored when '%s' is pki", fieldCredentials, fieldCredentialsPasswordFile, fieldAuthMode)
+		c.log.Warnf("field '%s.%s' is ignored when '%s' is pki", aoFieldCredentials, aoFieldCredentialsPasswordFile, aoFieldAuthMode)
 		c.warnedIgnoredPassword = true
 	}
 

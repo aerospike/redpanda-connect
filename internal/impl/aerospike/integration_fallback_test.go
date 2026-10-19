@@ -98,7 +98,7 @@ const noNSUPNamespace = "nosup"
 func TestIntegrationFallbackDLQ(t *testing.T) {
 	host := integrationHost(t)
 	client := fallbackClient(t, host)
-	sink := &dlqSink{}
+	sink := new(dlqSink)
 	env := newDLQEnv(t, sink)
 
 	t.Run("rejected record is published", func(t *testing.T) {

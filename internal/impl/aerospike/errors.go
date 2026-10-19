@@ -51,8 +51,8 @@ var retryableResultCodes = map[types.ResultCode]struct{}{
 }
 
 func retryableIgnore(code int) bool {
-	_, ok := retryableResultCodes[types.ResultCode(code)]
-	return ok
+	_, exists := retryableResultCodes[types.ResultCode(code)]
+	return exists
 }
 
 // isConnectionError reports whether err is a transport or auth failure that

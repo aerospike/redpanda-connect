@@ -23,13 +23,13 @@ import (
 	"github.com/redpanda-data/benthos/v4/public/service"
 )
 
-// fieldCommitLevel is the configuration field for the write commit policy.
-const fieldCommitLevel = "commit_level"
+// aoFieldCommitLevel is the configuration field for the write commit policy.
+const aoFieldCommitLevel = "commit_level"
 
 // commitLevelField is the write durability choice: wait for replicas, or only
 // for the master. Strong-consistency namespaces require `all`.
 func commitLevelField() *service.ConfigField {
-	return service.NewStringAnnotatedEnumField(fieldCommitLevel, map[string]string{
+	return service.NewStringAnnotatedEnumField(aoFieldCommitLevel, map[string]string{
 		"all":    "Wait until the master and all replicas have committed. Required for strong-consistency namespaces.",
 		"master": "Wait only for the master. Faster in AP namespaces when replica lag is acceptable.",
 	}).

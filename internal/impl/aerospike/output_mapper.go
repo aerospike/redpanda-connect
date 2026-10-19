@@ -467,7 +467,7 @@ func (m *batchMapper) mapMessage(index int) (*pendingOp, error) {
 	}
 
 	if len(op.binOrder) == 0 {
-		return nil, fmt.Errorf("mapping in field '%v' produced no bins; a record must have at least one bin", fieldBins)
+		return nil, fmt.Errorf("mapping in field '%v' produced no bins; a record must have at least one bin", aoFieldBins)
 	}
 
 	// Reject this message before coalescing. Folding an all-null replace into
@@ -492,11 +492,11 @@ func (m *batchMapper) resolveOperation(index int) (opKind, error) {
 	}
 	opStr, err := m.op.TryString(index)
 	if err != nil {
-		return 0, fmt.Errorf("interpolating '%v': %w", fieldOperation, err)
+		return 0, fmt.Errorf("interpolating '%v': %w", aoFieldOperation, err)
 	}
 	kind, err := parseOpKind(opStr)
 	if err != nil {
-		return 0, fmt.Errorf("field '%v': %w", fieldOperation, err)
+		return 0, fmt.Errorf("field '%v': %w", aoFieldOperation, err)
 	}
 	return kind, nil
 }
@@ -507,11 +507,11 @@ func (m *batchMapper) resolveTTL(index int) (uint32, error) {
 	}
 	ttlStr, err := m.ttl.TryString(index)
 	if err != nil {
-		return 0, fmt.Errorf("interpolating '%v': %w", fieldTTL, err)
+		return 0, fmt.Errorf("interpolating '%v': %w", aoFieldTTL, err)
 	}
 	ttl, err := parseTTL(ttlStr)
 	if err != nil {
-		return 0, fmt.Errorf("field '%v': %w", fieldTTL, err)
+		return 0, fmt.Errorf("field '%v': %w", aoFieldTTL, err)
 	}
 	return ttl, nil
 }
@@ -522,7 +522,7 @@ func (m *batchMapper) resolveGeneration(index int) (uint32, bool, error) {
 	}
 	raw, err := m.generation.TryString(index)
 	if err != nil {
-		return 0, false, fmt.Errorf("interpolating '%v': %w", fieldGeneration, err)
+		return 0, false, fmt.Errorf("interpolating '%v': %w", aoFieldGeneration, err)
 	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "null" {
@@ -530,7 +530,7 @@ func (m *batchMapper) resolveGeneration(index int) (uint32, bool, error) {
 	}
 	v, err := strconv.ParseUint(raw, 10, 32)
 	if err != nil {
-		return 0, false, fmt.Errorf("field '%v' resolved to %q, which is not an unsigned integer: %w", fieldGeneration, raw, err)
+		return 0, false, fmt.Errorf("field '%v' resolved to %q, which is not an unsigned integer: %w", aoFieldGeneration, raw, err)
 	}
 	return uint32(v), true, nil
 }
@@ -538,11 +538,11 @@ func (m *batchMapper) resolveGeneration(index int) (uint32, bool, error) {
 func (m *batchMapper) resolveFence(index int) (int64, error) {
 	raw, err := m.fence.TryString(index)
 	if err != nil {
-		return 0, fmt.Errorf("interpolating '%v.%v': %w", fieldFencing, fieldFencingValue, err)
+		return 0, fmt.Errorf("interpolating '%v.%v': %w", aoFieldFencing, aoFieldFencingValue, err)
 	}
 	fence, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("field '%v.%v' resolved to %q, which is not an integer: %w", fieldFencing, fieldFencingValue, raw, err)
+		return 0, fmt.Errorf("field '%v.%v' resolved to %q, which is not an integer: %w", aoFieldFencing, aoFieldFencingValue, raw, err)
 	}
 	return fence, nil
 }
@@ -551,22 +551,22 @@ func (m *batchMapper) resolveFence(index int) (int64, error) {
 func (m *batchMapper) applyBins(op *pendingOp, index int) error {
 	mapped, err := m.bins.Query(index)
 	if err != nil {
-		return fmt.Errorf("executing mapping in field '%v': %w", fieldBins, err)
+		return fmt.Errorf("executing mapping in field '%v': %w", aoFieldBins, err)
 	}
 	if mapped == nil {
 		// The mapping deleted the root. Dropping the message here would look
 		// like a successful write, so make the user filter upstream instead.
-		return fmt.Errorf("mapping in field '%v' deleted the root; filter unwanted messages with a processor before this output", fieldBins)
+		return fmt.Errorf("mapping in field '%v' deleted the root; filter unwanted messages with a processor before this output", aoFieldBins)
 	}
 
 	res, err := mapped.AsStructured()
 	if err != nil {
-		return fmt.Errorf("mapping in field '%v' did not produce structured data: %w", fieldBins, err)
+		return fmt.Errorf("mapping in field '%v' did not produce structured data: %w", aoFieldBins, err)
 	}
 
 	obj, ok := res.(map[string]any)
 	if !ok {
-		return fmt.Errorf("mapping in field '%v' must produce an object, got %T", fieldBins, res)
+		return fmt.Errorf("mapping in field '%v' must produce an object, got %T", aoFieldBins, res)
 	}
 
 	// Sort for deterministic bin ordering; Go map iteration is randomised and
@@ -582,7 +582,7 @@ func (m *batchMapper) applyBins(op *pendingOp, index int) error {
 			if len(name) > maxBinNameLen {
 				return &longBinNameError{key: op.key, name: name, n: len(name)}
 			}
-			return fmt.Errorf("%w; rename it in the '%v' mapping", err, fieldBins)
+			return fmt.Errorf("%w; rename it in the '%v' mapping", err, aoFieldBins)
 		}
 		value, err := toAerospike(obj[name], m.conf.coerceInts)
 		if err != nil {
@@ -597,7 +597,7 @@ func (m *batchMapper) applyBins(op *pendingOp, index int) error {
 			size += len(name) + estimateSize(op.bins[name])
 		}
 		if size > m.conf.maxRecordBytes {
-			return fmt.Errorf("mapped record is about %d bytes, which exceeds max_record_bytes (%d); Aerospike rewrites the whole record on every update, so cap collections in the '%v' mapping or split the data across keys", size, m.conf.maxRecordBytes, fieldBins)
+			return fmt.Errorf("mapped record is about %d bytes, which exceeds max_record_bytes (%d); Aerospike rewrites the whole record on every update, so cap collections in the '%v' mapping or split the data across keys", size, m.conf.maxRecordBytes, aoFieldBins)
 		}
 	}
 	return nil
