@@ -1009,7 +1009,7 @@ func TestFilteredOutCountIncludesFoldedIndexes(t *testing.T) {
 }
 
 func TestHandleRecordFilteredOutIsSuccess(t *testing.T) {
-	w := &aerospikeWriter{}
+	w := new(aerospikeWriter)
 	op := opWith(t, 0, "u1", opWrite, map[string]any{"a": 1})
 	rec := &as.BatchRecord{Key: testKey(t, "u1"), ResultCode: types.FILTERED_OUT}
 

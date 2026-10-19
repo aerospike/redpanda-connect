@@ -33,14 +33,14 @@ func cipherSuiteIDs(names []string) ([]uint16, error) {
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
-			return nil, fmt.Errorf("field '%s' contains an empty cipher name", fieldCiphers)
+			return nil, fmt.Errorf("field '%s' contains an empty cipher name", asFieldCiphers)
 		}
 		suite := cipherSuiteByName(supported, name)
 		if suite == nil {
-			return nil, fmt.Errorf("field '%s': unknown cipher %q", fieldCiphers, name)
+			return nil, fmt.Errorf("field '%s': unknown cipher %q", asFieldCiphers, name)
 		}
 		if tls13Only(suite) {
-			return nil, fmt.Errorf("field '%s': %s is a TLS 1.3 cipher suite, which the Go client always offers and does not accept in this list", fieldCiphers, name)
+			return nil, fmt.Errorf("field '%s': %s is a TLS 1.3 cipher suite, which the Go client always offers and does not accept in this list", asFieldCiphers, name)
 		}
 		if _, dup := seen[suite.ID]; dup {
 			continue
@@ -76,8 +76,8 @@ func insecureCipherNames(ids []uint16) []string {
 	}
 	var names []string
 	for _, id := range ids {
-		name, ok := byID[id]
-		if !ok {
+		name, exists := byID[id]
+		if !exists {
 			continue
 		}
 		names = append(names, name)

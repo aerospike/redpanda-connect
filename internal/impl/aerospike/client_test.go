@@ -863,10 +863,10 @@ func TestKeyRejectsStaticNamesAtParse(t *testing.T) {
 		yaml string
 		want string
 	}{
-		{name: "null namespace", yaml: "namespace: 'null'\nkey: k\n", want: fieldNamespace},
-		{name: "empty namespace", yaml: "namespace: ''\nkey: k\n", want: fieldNamespace},
-		{name: "null set", yaml: "namespace: test\nset: 'null'\nkey: k\n", want: fieldSet},
-		{name: "colon in set", yaml: "namespace: test\nset: 'a:b'\nkey: k\n", want: fieldSet},
+		{name: "null namespace", yaml: "namespace: 'null'\nkey: k\n", want: asFieldNamespace},
+		{name: "empty namespace", yaml: "namespace: ''\nkey: k\n", want: asFieldNamespace},
+		{name: "null set", yaml: "namespace: test\nset: 'null'\nkey: k\n", want: asFieldSet},
+		{name: "colon in set", yaml: "namespace: test\nset: 'a:b'\nkey: k\n", want: asFieldSet},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

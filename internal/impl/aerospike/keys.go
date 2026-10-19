@@ -29,12 +29,12 @@ import (
 
 // Configuration field names that address an Aerospike record.
 const (
-	fieldNamespace   = "namespace"
-	fieldSet         = "set"
-	fieldKey         = "key"
-	fieldDigest      = "digest"
-	fieldKeyType     = "key_type"
-	fieldKeyEncoding = "key_encoding"
+	asFieldNamespace   = "namespace"
+	asFieldSet         = "set"
+	asFieldKey         = "key"
+	asFieldDigest      = "digest"
+	asFieldKeyType     = "key_type"
+	asFieldKeyEncoding = "key_encoding"
 
 	// digestLen is the RIPEMD-160 length Aerospike uses to address a record.
 	// The client rejects any other length.
@@ -52,7 +52,7 @@ const (
 // outputKeyFields returns the fields that address an Aerospike record by user
 // key or by digest. Exactly one of the two must be set.
 func outputKeyFields(keyExamples ...string) []*service.ConfigField {
-	keyField := service.NewInterpolatedStringField(fieldKey).
+	keyField := service.NewInterpolatedStringField(asFieldKey).
 		Description("The record primary key. Set this or `digest`, not both. Aerospike hashes this value into the record digest; to write a digest the producer already has, use `digest`.").
 		Optional()
 	for _, ex := range keyExamples {
@@ -60,14 +60,14 @@ func outputKeyFields(keyExamples ...string) []*service.ConfigField {
 	}
 
 	return []*service.ConfigField{
-		service.NewInterpolatedStringField(fieldNamespace).
+		service.NewInterpolatedStringField(asFieldNamespace).
 			Description("The Aerospike namespace. Namespaces are declared in the server config and cannot be created at runtime. A resolved value of `null` is rejected, because a missing interpolated field stringifies to that. Use `meta(\"kafka_topic\")` when the topic name is the namespace.").
 			Example("test").
 			Example(`${! meta("kafka_topic") }`).
 			Example(`${! json("namespace_name") }`).
 			Example(`${! meta("as_namespace") }`),
 
-		service.NewInterpolatedStringField(fieldSet).
+		service.NewInterpolatedStringField(asFieldSet).
 			Description("The set within the namespace. Sets are created implicitly on first write and cannot be dropped except by truncating. Names are at most 63 bytes and must not contain a colon. A namespace also has a hard cap on how many sets it can hold, so do not interpolate an unbounded value. A small fixed list, such as the topics this pipeline consumes, is fine. A payload field is only safe when the mapping throws for anything outside that list, so a bad value fails before a write can create a set. Leave empty for the null set. The literal `null` is rejected, because a missing interpolated field stringifies to that and would create a set that cannot be dropped except by truncating.").
 			Default("").
 			Example("users").
@@ -76,18 +76,18 @@ func outputKeyFields(keyExamples ...string) []*service.ConfigField {
 			Example(`${! meta("as_set") }`),
 
 		keyField,
-		service.NewInterpolatedStringField(fieldDigest).
+		service.NewInterpolatedStringField(asFieldDigest).
 			Description("The 20-byte record digest as standard Base64, as produced by another Aerospike client. The user key stored with the record is null. Set this or `key`, not both. `key_type` and `key_encoding` apply only to `key`. `namespace` and `set` must be the ones the digest was computed for.\n\nInterpolation always yields a string, so a raw 20-byte digest cannot be told apart from 20 characters of text and is rejected. Encode it in the mapping instead: `${! content().encode(\"base64\") }` for a raw payload, or `${! meta(\"kafka_key\").encode(\"base64\") }` for a raw Kafka key.\n\nThis does not hash the value. `key` with `key_type: bytes` hashes those bytes and addresses a different record.").
 			Optional().
 			Example(`${! json("digest") }`).
 			Example(`${! content().encode("base64") }`).
 			Example(`${! meta("kafka_key").encode("base64") }`),
 
-		service.NewStringEnumField(fieldKeyType, "string", "int", "bytes").
+		service.NewStringEnumField(asFieldKeyType, "string", "int", "bytes").
 			Description("How to interpret the resolved `key`. Aerospike addresses records by a digest of the key, and the digest differs between a string `\"123\"` and an integer `123`. This must match whatever else reads or writes these records.").
 			Default("string"),
 
-		service.NewStringEnumField(fieldKeyEncoding, "utf8", "base64", "hex").
+		service.NewStringEnumField(asFieldKeyEncoding, "utf8", "base64", "hex").
 			Description("How to decode the interpolated `key` when `key_type` is `bytes`. Interpolation always yields a string, so a genuine binary key must be carried as base64 or hex. `utf8` uses the string's raw bytes and only matches other clients that also stored UTF-8.").
 			Default("utf8").
 			Advanced(),
@@ -107,39 +107,39 @@ type keyConfig struct {
 // parseKeyConfig reads the fields produced by outputKeyFields. Exactly one of
 // key and digest must be set.
 func parseKeyConfig(conf *service.ParsedConfig) (*keyConfig, error) {
-	k := &keyConfig{}
+	k := new(keyConfig)
 
 	var err error
-	if k.Namespace, err = conf.FieldInterpolatedString(fieldNamespace); err != nil {
+	if k.Namespace, err = conf.FieldInterpolatedString(asFieldNamespace); err != nil {
 		return nil, err
 	}
-	if k.Set, err = conf.FieldInterpolatedString(fieldSet); err != nil {
+	if k.Set, err = conf.FieldInterpolatedString(asFieldSet); err != nil {
 		return nil, err
 	}
-	if k.KeyType, err = conf.FieldString(fieldKeyType); err != nil {
+	if k.KeyType, err = conf.FieldString(asFieldKeyType); err != nil {
 		return nil, err
 	}
-	if k.KeyEncoding, err = conf.FieldString(fieldKeyEncoding); err != nil {
+	if k.KeyEncoding, err = conf.FieldString(asFieldKeyEncoding); err != nil {
 		return nil, err
 	}
 
-	keySet := conf.Contains(fieldKey)
-	digestSet := conf.Contains(fieldDigest)
+	keySet := conf.Contains(asFieldKey)
+	digestSet := conf.Contains(asFieldDigest)
 	if keySet == digestSet {
 		return nil, errors.New("exactly one of fields 'key' and 'digest' must be set")
 	}
 	if keySet {
-		if k.Key, err = conf.FieldInterpolatedString(fieldKey); err != nil {
+		if k.Key, err = conf.FieldInterpolatedString(asFieldKey); err != nil {
 			return nil, err
 		}
 	} else {
 		if k.KeyType != "string" {
-			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is set", fieldKeyType, k.KeyType, fieldKey)
+			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is set", asFieldKeyType, k.KeyType, asFieldKey)
 		}
 		if k.KeyEncoding != "" && k.KeyEncoding != "utf8" {
-			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is set", fieldKeyEncoding, k.KeyEncoding, fieldKey)
+			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is set", asFieldKeyEncoding, k.KeyEncoding, asFieldKey)
 		}
-		if k.Digest, err = conf.FieldInterpolatedString(fieldDigest); err != nil {
+		if k.Digest, err = conf.FieldInterpolatedString(asFieldDigest); err != nil {
 			return nil, err
 		}
 		if lit, ok := k.Digest.Static(); ok {
@@ -151,12 +151,12 @@ func parseKeyConfig(conf *service.ParsedConfig) (*keyConfig, error) {
 
 	if ns, ok := k.Namespace.Static(); ok {
 		if err := validateNamespaceName(ns); err != nil {
-			return nil, fmt.Errorf("field '%v': %w", fieldNamespace, err)
+			return nil, fmt.Errorf("field '%v': %w", asFieldNamespace, err)
 		}
 	}
 	if set, ok := k.Set.Static(); ok {
 		if err := validateSetName(set); err != nil {
-			return nil, fmt.Errorf("field '%v': %w", fieldSet, err)
+			return nil, fmt.Errorf("field '%v': %w", asFieldSet, err)
 		}
 	}
 	return k, nil
@@ -205,7 +205,7 @@ func (r *keyResolver) resolve(index int) (*as.Key, error) {
 
 	keyStr, err := r.key.TryString(index)
 	if err != nil {
-		return nil, fmt.Errorf("interpolating '%v': %w", fieldKey, err)
+		return nil, fmt.Errorf("interpolating '%v': %w", asFieldKey, err)
 	}
 	// An interpolation over a missing field yields the literal "null" rather
 	// than an error. Left alone, every message with an absent key would address
@@ -213,7 +213,7 @@ func (r *keyResolver) resolve(index int) (*as.Key, error) {
 	if keyStr == "" || keyStr == "null" {
 		return nil, fmt.Errorf(
 			"field '%v' resolved to %q, which is not a usable record key; the source field is probably missing from this message",
-			fieldKey, keyStr)
+			asFieldKey, keyStr)
 	}
 
 	keyVal, err := coerceKey(keyStr, r.keyType, r.keyEncoding)
@@ -231,18 +231,18 @@ func (r *keyResolver) resolve(index int) (*as.Key, error) {
 func (r *keyResolver) namespaceAndSet(index int) (string, string, error) {
 	namespace, err := r.namespace.TryString(index)
 	if err != nil {
-		return "", "", fmt.Errorf("interpolating '%v': %w", fieldNamespace, err)
+		return "", "", fmt.Errorf("interpolating '%v': %w", asFieldNamespace, err)
 	}
 	if err := validateNamespaceName(namespace); err != nil {
-		return "", "", fmt.Errorf("field '%v': %w", fieldNamespace, err)
+		return "", "", fmt.Errorf("field '%v': %w", asFieldNamespace, err)
 	}
 
 	setName, err := r.set.TryString(index)
 	if err != nil {
-		return "", "", fmt.Errorf("interpolating '%v': %w", fieldSet, err)
+		return "", "", fmt.Errorf("interpolating '%v': %w", asFieldSet, err)
 	}
 	if err := validateSetName(setName); err != nil {
-		return "", "", fmt.Errorf("field '%v': %w", fieldSet, err)
+		return "", "", fmt.Errorf("field '%v': %w", asFieldSet, err)
 	}
 	return namespace, setName, nil
 }
@@ -250,7 +250,7 @@ func (r *keyResolver) namespaceAndSet(index int) (string, string, error) {
 func (r *keyResolver) resolveDigest(index int, namespace, setName string) (*as.Key, error) {
 	s, err := r.digest.TryString(index)
 	if err != nil {
-		return nil, fmt.Errorf("interpolating '%v': %w", fieldDigest, err)
+		return nil, fmt.Errorf("interpolating '%v': %w", asFieldDigest, err)
 	}
 	raw, err := decodeDigest(s)
 	if err != nil {
@@ -270,14 +270,14 @@ func (r *keyResolver) resolveDigest(index int, namespace, setName string) (*as.K
 func decodeDigest(s string) ([]byte, error) {
 	// A missing interpolated field stringifies to "null".
 	if s == "" || s == "null" {
-		return nil, fmt.Errorf("field '%v' resolved to %q, which is not a usable digest; the source field is probably missing from this message", fieldDigest, s)
+		return nil, fmt.Errorf("field '%v' resolved to %q, which is not a usable digest; the source field is probably missing from this message", asFieldDigest, s)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
-		return nil, fmt.Errorf("field '%v' is not standard Base64: %w", fieldDigest, err)
+		return nil, fmt.Errorf("field '%v' is not standard Base64: %w", asFieldDigest, err)
 	}
 	if len(decoded) != digestLen {
-		return nil, fmt.Errorf("field '%v' decoded to %d bytes, which is not the Aerospike digest length of %d", fieldDigest, len(decoded), digestLen)
+		return nil, fmt.Errorf("field '%v' decoded to %d bytes, which is not the Aerospike digest length of %d", asFieldDigest, len(decoded), digestLen)
 	}
 	return decoded, nil
 }
@@ -286,18 +286,18 @@ func coerceKey(s, keyType, encoding string) (any, error) {
 	switch keyType {
 	case "int":
 		if encoding != "" && encoding != "utf8" {
-			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is bytes", fieldKeyEncoding, encoding, fieldKeyType)
+			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is bytes", asFieldKeyEncoding, encoding, asFieldKeyType)
 		}
 		v, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("field '%v' resolved to %q, which is not an integer as required by '%v': %w", fieldKey, s, fieldKeyType, err)
+			return nil, fmt.Errorf("field '%v' resolved to %q, which is not an integer as required by '%v': %w", asFieldKey, s, asFieldKeyType, err)
 		}
 		return v, nil
 	case "bytes":
 		return decodeBytesKey(s, encoding)
 	default:
 		if encoding != "" && encoding != "utf8" {
-			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is bytes", fieldKeyEncoding, encoding, fieldKeyType)
+			return nil, fmt.Errorf("field '%v' is %q, which only applies when '%v' is bytes", asFieldKeyEncoding, encoding, asFieldKeyType)
 		}
 		return s, nil
 	}
@@ -310,17 +310,17 @@ func decodeBytesKey(s, encoding string) (any, error) {
 	case "base64":
 		b, err := base64.StdEncoding.DecodeString(s)
 		if err != nil {
-			return nil, fmt.Errorf("field '%v' resolved to %q, which is not valid base64: %w", fieldKey, s, err)
+			return nil, fmt.Errorf("field '%v' resolved to %q, which is not valid base64: %w", asFieldKey, s, err)
 		}
 		return b, nil
 	case "hex":
 		b, err := hex.DecodeString(s)
 		if err != nil {
-			return nil, fmt.Errorf("field '%v' resolved to %q, which is not valid hex: %w", fieldKey, s, err)
+			return nil, fmt.Errorf("field '%v' resolved to %q, which is not valid hex: %w", asFieldKey, s, err)
 		}
 		return b, nil
 	default:
-		return nil, fmt.Errorf("field '%v': unknown encoding %q", fieldKeyEncoding, encoding)
+		return nil, fmt.Errorf("field '%v': unknown encoding %q", asFieldKeyEncoding, encoding)
 	}
 }
 

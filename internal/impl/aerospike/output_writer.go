@@ -32,7 +32,7 @@ func init() {
 }
 
 func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchOutput, service.BatchPolicy, int, error) {
-	batchPolicy, err := conf.FieldBatchPolicy(fieldBatching)
+	batchPolicy, err := conf.FieldBatchPolicy(asFieldBatching)
 	if err != nil {
 		return nil, batchPolicy, 0, err
 	}
@@ -60,7 +60,7 @@ func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (ser
 	}
 	parsed.client.sizePoolForConcurrency(maxInFlight)
 	if names := parsed.client.insecureCiphers; len(names) > 0 {
-		mgr.Logger().Warnf("field '%s' includes insecure cipher suites: %s", fieldCiphers, strings.Join(names, ", "))
+		mgr.Logger().Warnf("field '%s' includes insecure cipher suites: %s", asFieldCiphers, strings.Join(names, ", "))
 	}
 
 	return &aerospikeWriter{
@@ -238,7 +238,7 @@ func dropBinlessWrites(ops []*pendingOp, failures map[int]error) []*pendingOp {
 }
 
 func nullReplaceError(kind opKind, coalesced bool) error {
-	err := fmt.Errorf("mapping in field '%v' produced only null bin values; %s drops bins it does not name and a null value is not sent, so this write would have no bins", fieldBins, kind)
+	err := fmt.Errorf("mapping in field '%v' produced only null bin values; %s drops bins it does not name and a null value is not sent, so this write would have no bins", asFieldBins, kind)
 	if coalesced {
 		err = fmt.Errorf("%w; these messages were coalesced into one command", err)
 	}
