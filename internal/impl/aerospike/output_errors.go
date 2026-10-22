@@ -32,7 +32,7 @@ type longBinNameError struct {
 }
 
 func (e *longBinNameError) Error() string {
-	return fmt.Sprintf("bin name %q is %d bytes, which exceeds the Aerospike limit of %d; rename it in the '%v' mapping", e.name, e.n, maxBinNameLen, fieldBins)
+	return fmt.Sprintf("bin name %q is %d bytes, which exceeds the Aerospike limit of %d; rename it in the '%v' mapping", e.name, e.n, maxBinNameLen, aoFieldBins)
 }
 
 // classifyRecord converts a per-key batch result into an error, or nil when the
@@ -42,20 +42,21 @@ func (e *longBinNameError) Error() string {
 //
 //   - FILTERED_OUT means a fencing expression rejected the write because the
 //     record already holds newer data. That is the fence doing its job.
-//   - KEY_NOT_FOUND on a delete means the record was already gone, which makes
-//     deletes idempotent under redelivery.
-func classifyRecord(rec *as.BatchRecord, kind opKind) error {
+//   - KEY_NOT_FOUND on a plain delete means the record was already gone, which
+//     makes deletes idempotent under redelivery. A delete folded from
+//     replace_only still fails: that operation required the record.
+func classifyRecord(rec *as.BatchRecord, op *pendingOp) error {
 	switch rec.ResultCode {
 	case types.OK, types.FILTERED_OUT:
 		return nil
 	case types.KEY_NOT_FOUND_ERROR:
-		if kind == opDelete {
+		if op.kind == opDelete && !op.deleteRequiresRecord {
 			return nil
 		}
 	}
 
 	err := fmt.Errorf("aerospike write failed for key %v: %s (code %d: %s)",
-		rec.Key, explain(rec.ResultCode, kind), rec.ResultCode, types.ResultCodeToString(rec.ResultCode))
+		rec.Key, explain(rec.ResultCode, op), rec.ResultCode, types.ResultCodeToString(rec.ResultCode))
 
 	if rec.InDoubt {
 		// The client could not confirm the outcome. Surfacing this matters
@@ -67,7 +68,8 @@ func classifyRecord(rec *as.BatchRecord, kind opKind) error {
 
 // explain adds write-specific context to the shared result code explanations,
 // where knowing the operation makes the message more useful.
-func explain(code types.ResultCode, kind opKind) string {
+func explain(code types.ResultCode, op *pendingOp) string {
+	kind := op.kind
 	switch code {
 	case types.KEY_EXISTS_ERROR:
 		if kind == opCreateOnly {
@@ -77,12 +79,15 @@ func explain(code types.ResultCode, kind opKind) string {
 		if kind == opUpdateOnly {
 			return "the record does not exist and the operation is update_only"
 		}
+		if kind == opReplaceOnly || (kind == opDelete && op.deleteRequiresRecord) {
+			return "the record does not exist and the operation is replace_only"
+		}
 	case types.KEY_BUSY:
 		return explainResultCode(code) + ". Enabling coalesce_batch_keys collapses repeats of a key within a batch"
 	case types.BIN_NAME_TOO_LONG:
-		return explainResultCode(code) + fmt.Sprintf("; rename it in the '%v' mapping", fieldBins)
+		return explainResultCode(code) + fmt.Sprintf("; rename it in the '%v' mapping", aoFieldBins)
 	case types.BIN_TYPE_ERROR:
-		return explainResultCode(code) + fmt.Sprintf("; check '%v'", fieldCoerceIntegralFloats)
+		return explainResultCode(code) + fmt.Sprintf("; check '%v'", aoFieldCoerceIntegralFloats)
 	}
 	return explainResultCode(code)
 }

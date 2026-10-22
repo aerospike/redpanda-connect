@@ -50,7 +50,7 @@ require (
 	github.com/PaesslerAG/jsonpath v0.1.1
 	github.com/SAP/go-hdb v1.16.8
 	github.com/a2aproject/a2a-go v0.3.12
-	github.com/aerospike/aerospike-client-go/v8 v8.8.0
+	github.com/aerospike/aerospike-client-go/v8 v8.9.0
 	github.com/apache/arrow-go/v18 v18.7.0
 	github.com/apache/iceberg-go v0.6.1-0.20260817231015-4390d2af2bb0
 	github.com/apache/pulsar-client-go v0.18.0
@@ -146,7 +146,7 @@ require (
 	github.com/rabbitmq/amqp091-go v1.14.0
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9
 	github.com/redis/go-redis/v9 v9.18.0
-	github.com/redpanda-data/benthos/v4 v4.82.0
+	github.com/redpanda-data/benthos/v4 v4.83.0
 	github.com/redpanda-data/common-go/authz v0.2.1-0.20260319205134-242ab3c168b8
 	github.com/redpanda-data/common-go/license v0.0.0-20260318014216-2bbd72bde0a0
 	github.com/redpanda-data/common-go/redpanda-otel-exporter v0.4.0

@@ -1095,6 +1095,229 @@ func TestIntegrationUpdateOnlyFailsWhenMissing(t *testing.T) {
 	assert.Nil(t, outputRead(t, client, "uo1"))
 }
 
+func TestIntegrationReplaceOnlyClearsOldBins(t *testing.T) {
+	w, client := outputSetup(t, "operation: '${! meta(\"op\") }'\n")
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "write", `{"id":"ro1","a":1,"b":2}`)}))
+
+	require.NoError(t, w.WriteBatch(t.Context(),
+		service.MessageBatch{opMsg(t, "replace_only", `{"id":"ro1","a":9}`)}))
+
+	rec := outputRead(t, client, "ro1")
+	require.NotNil(t, rec)
+	assert.Equal(t, 9, rec.Bins["a"])
+	assert.NotContains(t, rec.Bins, "b", "replace_only must drop bins not named in the write")
+}
+
+func TestIntegrationFencedDeleteThenReplaceOnly(t *testing.T) {
+	w, client := outputSetup(t, `
+key: '${! meta("k") }'
+bins: 'root = this'
+operation: '${! meta("op").or("write") }'
+fencing:
+  enabled: true
+  bin: _off
+  value: '${! meta("off") }'
+`)
+
+	create := msg(t, `{"v":"live","extra":1}`)
+	create.MetaSet("k", "fdro1")
+	create.MetaSet("op", "write")
+	create.MetaSet("off", "10")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{create}))
+
+	tombstone := msg(t, ``)
+	tombstone.MetaSet("k", "fdro1")
+	tombstone.MetaSet("off", "11")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{tombstone}))
+
+	rec := outputRead(t, client, "fdro1")
+	require.NotNil(t, rec, "a fenced delete must leave a tombstone record")
+	assert.Equal(t, true, rec.Bins["_deleted"])
+
+	repl := msg(t, `{"v":"back"}`)
+	repl.MetaSet("k", "fdro1")
+	repl.MetaSet("op", "replace_only")
+	repl.MetaSet("off", "12")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{repl}))
+
+	rec = outputRead(t, client, "fdro1")
+	require.NotNil(t, rec)
+	assert.Equal(t, "back", rec.Bins["v"])
+	assert.Equal(t, 12, rec.Bins["_off"])
+	assert.NotContains(t, rec.Bins, "_deleted", "replace_only must remove the tombstone")
+	assert.NotContains(t, rec.Bins, "extra", "replace_only must drop bins it does not name")
+}
+
+func TestIntegrationFencedDeleteThenReplaceOnlyInOneBatch(t *testing.T) {
+	w, client := outputSetup(t, `
+key: '${! meta("k") }'
+bins: 'root = this'
+operation: '${! meta("op").or("write") }'
+fencing:
+  enabled: true
+  bin: _off
+  value: '${! meta("off") }'
+`)
+
+	create := msg(t, `{"v":"live","extra":1}`)
+	create.MetaSet("k", "fdro2")
+	create.MetaSet("op", "write")
+	create.MetaSet("off", "10")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{create}))
+
+	tombstone := msg(t, ``)
+	tombstone.MetaSet("k", "fdro2")
+	tombstone.MetaSet("off", "11")
+	repl := msg(t, `{"v":"back"}`)
+	repl.MetaSet("k", "fdro2")
+	repl.MetaSet("op", "replace_only")
+	repl.MetaSet("off", "12")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{tombstone, repl}))
+
+	rec := outputRead(t, client, "fdro2")
+	require.NotNil(t, rec)
+	assert.Equal(t, "back", rec.Bins["v"], "the replace_only payload must survive coalescing with the delete")
+	assert.Equal(t, 12, rec.Bins["_off"])
+	assert.NotContains(t, rec.Bins, "_deleted")
+	assert.NotContains(t, rec.Bins, "extra")
+}
+
+func TestIntegrationFencedDeleteThenUpdateOnlyInOneBatch(t *testing.T) {
+	// update_only after a fenced delete folds to replace. The update carries a
+	// nil tombstone bin, which REPLACE rejects, so the write omits it and the
+	// replace drops the tombstone by not naming it.
+	w, client := outputSetup(t, `
+key: '${! meta("k") }'
+bins: 'root = this'
+operation: '${! meta("op").or("write") }'
+fencing:
+  enabled: true
+  bin: _off
+  value: '${! meta("off") }'
+`)
+
+	create := msg(t, `{"v":"live","extra":1}`)
+	create.MetaSet("k", "fduo1")
+	create.MetaSet("op", "write")
+	create.MetaSet("off", "10")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{create}))
+
+	tombstone := msg(t, ``)
+	tombstone.MetaSet("k", "fduo1")
+	tombstone.MetaSet("off", "11")
+	upd := msg(t, `{"v":"back"}`)
+	upd.MetaSet("k", "fduo1")
+	upd.MetaSet("op", "update_only")
+	upd.MetaSet("off", "12")
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{tombstone, upd}))
+
+	rec := outputRead(t, client, "fduo1")
+	require.NotNil(t, rec)
+	assert.Equal(t, "back", rec.Bins["v"], "the update_only payload must survive coalescing with the delete")
+	assert.Equal(t, 12, rec.Bins["_off"])
+	assert.NotContains(t, rec.Bins, "_deleted")
+	assert.NotContains(t, rec.Bins, "extra", "bins the delete removed must not survive the folded replace")
+}
+
+func TestIntegrationReplaceOnlyFailsWhenMissing(t *testing.T) {
+	w, client := outputSetup(t, "operation: replace_only\n")
+
+	batch := service.MessageBatch{msg(t, `{"id":"ro-missing","a":1}`)}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	require.Error(t, err)
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "replace_only")
+	assert.Nil(t, outputRead(t, client, "ro-missing"))
+}
+
+func TestIntegrationNullBinsAndFoldedDelete(t *testing.T) {
+	w, client := outputSetup(t, "operation: '${! meta(\"op\") }'\n")
+
+	t.Run("null replace leaves the earlier write", func(t *testing.T) {
+		batch := service.MessageBatch{
+			opMsg(t, "write", `{"id":"wnr1","a":1}`),
+			opMsg(t, "replace", `{"id":"wnr1","a":null}`),
+		}
+		indexer := batch.Index()
+		err := w.WriteBatch(t.Context(), batch)
+		require.Error(t, err)
+
+		var batchErr *service.BatchError
+		require.ErrorAs(t, err, &batchErr)
+		assert.Equal(t, 1, batchErr.IndexedErrors())
+		assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "only null bin values")
+
+		rec := outputRead(t, client, "wnr1")
+		require.NotNil(t, rec)
+		assert.Equal(t, 1, rec.Bins["a"])
+	})
+
+	t.Run("replace then null write deletes", func(t *testing.T) {
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"rnw1","a":1,"extra":2}`),
+		}))
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "replace", `{"id":"rnw1","a":9}`),
+			opMsg(t, "write", `{"id":"rnw1","a":null}`),
+		}))
+		assert.Nil(t, outputRead(t, client, "rnw1"))
+	})
+
+	t.Run("replace_only then null update deletes an existing record", func(t *testing.T) {
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"rou1","a":1,"extra":2}`),
+		}))
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "replace_only", `{"id":"rou1","a":9}`),
+			opMsg(t, "update_only", `{"id":"rou1","a":null}`),
+		}))
+		assert.Nil(t, outputRead(t, client, "rou1"))
+	})
+
+	t.Run("replace_only then null update fails when missing", func(t *testing.T) {
+		batch := service.MessageBatch{
+			opMsg(t, "replace_only", `{"id":"rou-missing","a":1}`),
+			opMsg(t, "update_only", `{"id":"rou-missing","a":null}`),
+		}
+		indexer := batch.Index()
+		err := w.WriteBatch(t.Context(), batch)
+		require.Error(t, err)
+
+		var batchErr *service.BatchError
+		require.ErrorAs(t, err, &batchErr)
+		assert.Equal(t, 2, batchErr.IndexedErrors())
+		assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "replace_only")
+		assert.Nil(t, outputRead(t, client, "rou-missing"))
+	})
+
+	t.Run("replace_only keeps a remaining bin", func(t *testing.T) {
+		missing := service.MessageBatch{
+			opMsg(t, "replace_only", `{"id":"rou-bin","a":1,"b":2}`),
+			opMsg(t, "update_only", `{"id":"rou-bin","a":null}`),
+		}
+		indexer := missing.Index()
+		err := w.WriteBatch(t.Context(), missing)
+		require.Error(t, err)
+		assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "replace_only")
+		assert.Nil(t, outputRead(t, client, "rou-bin"))
+
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "write", `{"id":"rou-bin","a":1,"extra":7,"b":3}`),
+		}))
+		require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+			opMsg(t, "replace_only", `{"id":"rou-bin","a":1,"b":2}`),
+			opMsg(t, "update_only", `{"id":"rou-bin","a":null}`),
+		}))
+		rec := outputRead(t, client, "rou-bin")
+		require.NotNil(t, rec)
+		assert.Equal(t, 2, rec.Bins["b"])
+		assert.NotContains(t, rec.Bins, "a")
+		assert.NotContains(t, rec.Bins, "extra")
+	})
+}
+
 func TestIntegrationPartialFailure(t *testing.T) {
 	w, client := outputSetup(t, "")
 

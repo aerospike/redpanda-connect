@@ -76,7 +76,7 @@ func newTLSRefresher(conf *service.ParsedConfig, tlsConf *tls.Config, hosts []*a
 		return nil, nil
 	}
 
-	ns := conf.Namespace(fieldTLS)
+	ns := conf.Namespace(aoFieldTLS)
 	rootFile, err := ns.FieldString(fieldRootCAsFile)
 	if err != nil {
 		return nil, err
