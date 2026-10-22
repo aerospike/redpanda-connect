@@ -4,9 +4,9 @@ Measures `output.aerospike` writing to a single-node Enterprise server in Docker
 
 This server is separate from the integration cluster (`as-ee-1` on `127.0.0.1:3100` and `as-ee-2` on `127.0.0.1:3110`). Do not point the benchmark at that cluster.
 
-This is the local half of connector certification. It is not a certification result. The real comparison, loader to broker to sink to a deployed Aerospike cluster, is in the `aerospike-connect` repository under `perftests`, profile `redpanda-inbound`. That work is on a branch until its pull request merges. It uses the same record shape and the same default batch (10 records or 200ms) as `perftests/k8s/stacks/redpanda-inbound/redpanda-connect/pipeline.yaml.tpl`. The Kafka sink comparison is that profile against `kafka-inbound`, not this directory.
+This is the local half of connector certification. It is not a certification result. The real comparison, loader to broker to sink to a deployed Aerospike cluster, is in the `aerospike-connect` repository under `perftests`, profile `redpanda-inbound`, on the redpanda-inbound perf-test branch until its PR merges. It uses the same record shape and the same default batch (10 records or 200ms) as `perftests/k8s/stacks/redpanda-inbound/redpanda-connect/pipeline.yaml.tpl`. The Kafka sink comparison is that profile against `kafka-inbound`, not this directory.
 
-The smoke test is recorded in [`docs/benchmark-results/aerospike.md`](../../../../docs/benchmark-results/aerospike.md). That file is not a certification result. Certification still needs longer runs, CPU and memory at several rates, and the perf-lab comparison with the Kafka sink.
+The local runs and the GCP Redpanda runs are recorded in [`docs/benchmark-results/aerospike.md`](../../../../docs/benchmark-results/aerospike.md). That file is not a certification result. The Kafka sink comparison on the same profiles is not collected yet.
 
 ## Record
 
