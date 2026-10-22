@@ -3,6 +3,12 @@ Changelog
 
 All notable changes to this project will be documented in this file.
 
+## 4.115.0 - TBD
+
+### Added
+
+- aerospike: New `aerospike` output. ([@abhilashmandaliya](https://github.com/abhilashmandaliya), [#NNNN](https://github.com/redpanda-data/connect/pull/NNNN))
+
 ## 4.114.0 - 2026-10-16
 
 ### Added
