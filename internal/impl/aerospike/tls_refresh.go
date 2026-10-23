@@ -21,6 +21,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -54,6 +55,12 @@ type tlsRefresher struct {
 
 	roots       atomic.Pointer[x509.CertPool]
 	clientCerts atomic.Pointer[[]tls.Certificate]
+
+	// verifyPeerCertificate is whatever the shared TLS config already installed
+	// (for example revoke_certificates) before the CA-refresh path below took
+	// over VerifyPeerCertificate. verifyServer calls it with the chain Verify
+	// built, instead of leaving it to Go's own InsecureSkipVerify dispatch.
+	verifyPeerCertificate func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
 
 	mu   sync.Mutex
 	refs int
@@ -91,6 +98,9 @@ func newTLSRefresher(conf *service.ParsedConfig, tlsConf *tls.Config, hosts []*a
 
 	r := &tlsRefresher{interval: interval}
 	if rootFile != "" && !tlsConf.InsecureSkipVerify {
+		if err := requireNamedHosts(hosts, clusterName); err != nil {
+			return nil, err
+		}
 		pemBytes, err := os.ReadFile(rootFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading '%v' file %q: %w", fieldRootCAsFile, rootFile, err)
@@ -109,6 +119,13 @@ func newTLSRefresher(conf *service.ParsedConfig, tlsConf *tls.Config, hosts []*a
 		// its own name check and skip filling an empty TLS name, so empty names
 		// are filled here first.
 		fillTLSNames(hosts, clusterName)
+		// InsecureSkipVerify below also stops Go from building a verified chain
+		// before calling VerifyPeerCertificate, so a check that expects that
+		// chain (revoke_certificates, including the CA) would only see the
+		// certificates the server actually sent. verifyServer below builds the
+		// chain itself and passes it through this callback instead.
+		r.verifyPeerCertificate = tlsConf.VerifyPeerCertificate
+		tlsConf.VerifyPeerCertificate = nil
 		tlsConf.InsecureSkipVerify = true
 		tlsConf.VerifyConnection = r.verifyServer
 	}
@@ -157,6 +174,39 @@ func newTLSRefresher(conf *service.ParsedConfig, tlsConf *tls.Config, hosts []*a
 	return r, nil
 }
 
+// requireNamedHosts rejects a host whose effective TLS name is a literal IP
+// address. Go's SNI extension drops an IP name, so the server name
+// VerifyConnection sees for that handshake is empty and the certificate's
+// name is never checked. cluster_name, or a host tlsname, must name the
+// server instead.
+func requireNamedHosts(hosts []*as.Host, clusterName string) error {
+	for _, h := range hosts {
+		if h == nil {
+			continue
+		}
+		name := h.TLSName
+		if name == "" {
+			name = clusterName
+		}
+		if name == "" {
+			name = h.Name
+		}
+		if net.ParseIP(name) != nil {
+			return fmt.Errorf("field '%v': host %q has no TLS name and '%v' is not set; %v cannot verify a certificate against a bare IP address, set '%v' or a tlsname on the host", aoFieldHosts, h.Name, aoFieldClusterName, aoFieldCertRefreshInterval, aoFieldClusterName)
+		}
+	}
+	return nil
+}
+
+// refCount reports how many live users currently share this poller. Tests use
+// it to check start/stop reference counting without reaching through the
+// mutex field directly.
+func (r *tlsRefresher) refCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.refs
+}
+
 func fillTLSNames(hosts []*as.Host, clusterName string) {
 	for _, h := range hosts {
 		if h == nil || h.TLSName != "" {
@@ -200,6 +250,11 @@ func (r *tlsRefresher) start(log *service.Logger) func() {
 }
 
 func (r *tlsRefresher) loop(log *service.Logger, stop <-chan struct{}) {
+	// Reload once up front rather than waiting a full interval. start is called
+	// again on every reconnect once the previous poller has fully stopped
+	// (refs back to 0), and the files could have changed during the time this
+	// component held no poller at all.
+	r.reload(log)
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 	for {
@@ -276,6 +331,14 @@ func (r *tlsRefresher) verifyServer(cs tls.ConnectionState) error {
 	if len(cs.PeerCertificates) == 0 {
 		return errors.New("aerospike tls: server did not present a certificate")
 	}
+	// Go's client strips an IP address out of the SNI it sends, so cs.ServerName
+	// is empty for an IP seed host even though the dial used that address. An
+	// empty DNSName below would make Verify skip the hostname check entirely.
+	// requireNamedHosts rejects that config at parse time; this is the runtime
+	// backstop in case a name resolves to an IP some other way.
+	if cs.ServerName == "" {
+		return errors.New("aerospike tls: no server name to verify the certificate against; an IP seed host needs 'cluster_name' or a tlsname")
+	}
 	opts := x509.VerifyOptions{
 		Roots:         r.roots.Load(),
 		DNSName:       cs.ServerName,
@@ -284,8 +347,18 @@ func (r *tlsRefresher) verifyServer(cs tls.ConnectionState) error {
 	for _, cert := range cs.PeerCertificates[1:] {
 		opts.Intermediates.AddCert(cert)
 	}
-	if _, err := cs.PeerCertificates[0].Verify(opts); err != nil {
+	chains, err := cs.PeerCertificates[0].Verify(opts)
+	if err != nil {
 		return fmt.Errorf("aerospike tls: %w", err)
+	}
+	if r.verifyPeerCertificate != nil {
+		raw := make([][]byte, len(cs.PeerCertificates))
+		for i, cert := range cs.PeerCertificates {
+			raw[i] = cert.Raw
+		}
+		if err := r.verifyPeerCertificate(raw, chains); err != nil {
+			return err
+		}
 	}
 	return nil
 }

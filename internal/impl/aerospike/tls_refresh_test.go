@@ -15,6 +15,7 @@
 package aerospike
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -23,6 +24,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"os"
@@ -33,6 +35,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/redpanda-data/benthos/v4/public/service"
 )
 
 func TestCertRefreshIntervalOffLeavesStaticTLS(t *testing.T) {
@@ -55,6 +59,59 @@ cert_refresh_interval: 0s
 	require.NotNil(t, c.Policy.TlsConfig)
 	assert.Nil(t, c.Policy.TlsConfig.GetClientCertificate)
 	assert.NotEmpty(t, c.Policy.TlsConfig.Certificates)
+	assert.False(t, c.certRefreshIneffective, "interval is off; there is nothing to warn about")
+}
+
+// TestCertRefreshIneffectiveIsFlaggedWhenThereIsNothingToRefresh covers the two
+// ways cert_refresh_interval can be set but do nothing: TLS off entirely, and
+// TLS on with every certificate supplied as inline PEM rather than a file.
+// newAerospikeOutput turns this flag into a startup warning.
+func TestCertRefreshIneffectiveIsFlaggedWhenThereIsNothingToRefresh(t *testing.T) {
+	t.Run("tls disabled", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+cert_refresh_interval: 1h
+`)
+		require.NoError(t, err)
+		assert.Nil(t, c.tlsRefresh)
+		assert.True(t, c.certRefreshIneffective)
+	})
+
+	t.Run("every certificate is inline pem", func(t *testing.T) {
+		_, certPEM, keyPEM := leafCert(t, nil, nil, "rpcn", 1, nil, true)
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+  skip_cert_verify: true
+  client_certs:
+    - cert: |
+`+indentPEM(certPEM, 8)+`
+      key: |
+`+indentPEM(keyPEM, 8)+`
+cert_refresh_interval: 1h
+`)
+		require.NoError(t, err)
+		assert.Nil(t, c.tlsRefresh)
+		assert.True(t, c.certRefreshIneffective)
+	})
+}
+
+func TestCertRefreshIneffectiveWarnsAtStartup(t *testing.T) {
+	var buf bytes.Buffer
+	logger := service.NewLoggerFromSlog(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	mgr := service.MockResources(service.MockResourcesOptUseLogger(logger))
+	conf, err := outputSpec().ParseYAML(`
+hosts: ["127.0.0.1:1"]
+namespace: test
+key: k
+cert_refresh_interval: 1h
+`, nil)
+	require.NoError(t, err)
+	_, _, _, err = newAerospikeOutput(conf, mgr)
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "cert_refresh_interval")
+	assert.Contains(t, buf.String(), "has no effect")
 }
 
 func TestCertRefreshRejectsNegative(t *testing.T) {
@@ -84,6 +141,7 @@ cert_refresh_interval: 1h
 	assert.Nil(t, c.tlsRefresh)
 	assert.NotEmpty(t, c.Policy.TlsConfig.Certificates)
 	assert.Nil(t, c.Policy.TlsConfig.GetClientCertificate)
+	assert.True(t, c.certRefreshIneffective, "interval is set but every cert is inline PEM")
 }
 
 func TestCertRefreshClientCertOnNewHandshake(t *testing.T) {
@@ -98,7 +156,7 @@ func TestCertRefreshClientCertOnNewHandshake(t *testing.T) {
 	require.NoError(t, os.WriteFile(caPath, caCertPEM, 0o600))
 
 	c, err := parseClientYAML(t, `
-hosts: ["127.0.0.1:1"]
+hosts: ["server.example:1"]
 tls:
   enabled: true
   root_cas_file: `+caPath+`
@@ -217,6 +275,216 @@ cert_refresh_interval: 1h
 	kept, err := c.Policy.TlsConfig.GetClientCertificate(nil)
 	require.NoError(t, err)
 	assert.Equal(t, after.Certificate[0], kept.Certificate[0])
+}
+
+// Go strips an IP address out of the SNI it sends, so the refreshed
+// VerifyConnection path sees an empty server name for an IP seed host and
+// would otherwise skip the name check entirely (accepting any certificate the
+// CA signed). Static TLS does not have this hole: Go's own verification uses
+// the configured name directly, IP included, and fails on a cert with no
+// matching IP SAN.
+func TestCertRefreshRejectsIPHostWithoutTLSName(t *testing.T) {
+	dir := t.TempDir()
+	ca, caPEM, _ := caCert(t, "ca")
+	_, srvPEM, srvKey := leafCert(t, ca.cert, ca.key, "server.example", 2, []string{"server.example"}, false)
+	caPath := filepath.Join(dir, "ca.pem")
+	require.NoError(t, os.WriteFile(caPath, caPEM, 0o600))
+
+	yaml := func(interval string) string {
+		return `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+  root_cas_file: ` + caPath + `
+cert_refresh_interval: ` + interval + `
+`
+	}
+
+	t.Run("refresh off parses and fails the handshake on the missing IP SAN", func(t *testing.T) {
+		c, err := parseClientYAML(t, yaml("0s"))
+		require.NoError(t, err)
+		assert.Nil(t, c.tlsRefresh)
+
+		addr, _, cleanup := echoServer(t, mustKeyPair(t, srvPEM, srvKey), tls.NoClientCert, nil)
+		defer cleanup()
+		_, err = dialRaw(t, addr, c.Policy.TlsConfig, "127.0.0.1")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "IP SAN")
+	})
+
+	t.Run("refresh on is rejected at parse time instead of skipping the name check", func(t *testing.T) {
+		_, err := parseClientYAML(t, yaml("1h"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), aoFieldCertRefreshInterval)
+		assert.Contains(t, err.Error(), "IP address")
+	})
+
+	t.Run("refresh on parses once cluster_name names the server", func(t *testing.T) {
+		c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+  root_cas_file: `+caPath+`
+cluster_name: server.example
+cert_refresh_interval: 1h
+`)
+		require.NoError(t, err)
+		require.NotNil(t, c.tlsRefresh)
+		assert.Equal(t, "server.example", c.Hosts[0].TLSName)
+	})
+}
+
+// Direct unit test of the runtime backstop in verifyServer, independent of Go's
+// SNI stripping: an empty ConnectionState.ServerName must never be treated as
+// "no name check requested".
+func TestVerifyServerRejectsEmptyServerName(t *testing.T) {
+	ca, _, _ := caCert(t, "ca")
+	leaf, _, _ := leafCert(t, ca.cert, ca.key, "server.example", 2, []string{"server.example"}, false)
+
+	r := &tlsRefresher{}
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+	r.roots.Store(pool)
+
+	err := r.verifyServer(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server name")
+}
+
+// revokeRefreshTLS parses a config with a file-backed CA (so the CA-refresh
+// path installs VerifyConnection) and an optional revoke_certificates list.
+func revokeRefreshTLS(t *testing.T, caPath string, revoked []string, interval string) *clientConfig {
+	t.Helper()
+	var yaml strings.Builder
+	yaml.WriteString("hosts: [\"server.example:1\"]\n")
+	yaml.WriteString("tls:\n  enabled: true\n  root_cas_file: " + caPath + "\n")
+	if len(revoked) > 0 {
+		yaml.WriteString("revoke_certificates: [")
+		for i, serial := range revoked {
+			if i > 0 {
+				yaml.WriteString(", ")
+			}
+			yaml.WriteByte('"')
+			yaml.WriteString(serial)
+			yaml.WriteByte('"')
+		}
+		yaml.WriteString("]\n")
+	}
+	yaml.WriteString("cert_refresh_interval: " + interval + "\n")
+	c, err := parseClientYAML(t, yaml.String())
+	require.NoError(t, err)
+	return c
+}
+
+// The CA-refresh path sets InsecureSkipVerify so it can control the name
+// check itself, which also stops Go from building a verified chain before
+// calling VerifyPeerCertificate. revoke_certificates (#15) then only sees the
+// certificates the server sent, not the CA that signed them, so a revoked CA
+// serial stopped being rejected once cert_refresh_interval was set.
+func TestCertRefreshRevokeCertificatesStillSeeTheCA(t *testing.T) {
+	dir := t.TempDir()
+	ca, caPEM, _ := caCert(t, "ca") // caCert fixes SerialNumber to 1.
+	_, srvPEM, srvKey := leafCert(t, ca.cert, ca.key, "server.example", 2, []string{"server.example"}, false)
+	caPath := filepath.Join(dir, "ca.pem")
+	require.NoError(t, os.WriteFile(caPath, caPEM, 0o600))
+
+	addr, _, cleanup := echoServer(t, mustKeyPair(t, srvPEM, srvKey), tls.NoClientCert, nil)
+	defer cleanup()
+
+	t.Run("refresh off rejects the revoked ca serial", func(t *testing.T) {
+		c := revokeRefreshTLS(t, caPath, []string{"1"}, "0s")
+		assert.Nil(t, c.tlsRefresh)
+		_, err := dialRaw(t, addr, c.Policy.TlsConfig, "server.example")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serial 1 is revoked")
+	})
+
+	t.Run("refresh on also rejects the revoked ca serial", func(t *testing.T) {
+		c := revokeRefreshTLS(t, caPath, []string{"1"}, "1h")
+		require.NotNil(t, c.tlsRefresh)
+		_, err := dialRaw(t, addr, c.Policy.TlsConfig, "server.example")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serial 1 is revoked")
+	})
+
+	t.Run("refresh on still connects without a revoked serial", func(t *testing.T) {
+		c := revokeRefreshTLS(t, caPath, nil, "1h")
+		require.NotNil(t, c.tlsRefresh)
+		conn := dialTLS(t, addr, c.Policy.TlsConfig, "server.example")
+		exchange(t, conn)
+	})
+}
+
+// Unlike the other tests above, this does not call reload directly: it starts
+// the real poller and waits for its own ticker to pick up a file changed after
+// start.
+func TestCertRefreshPollerReloadsOnItsOwnTicker(t *testing.T) {
+	dir := t.TempDir()
+	_, firstPEM, firstKey := leafCert(t, nil, nil, "rpcn", 1, nil, true)
+	_, secondPEM, secondKey := leafCert(t, nil, nil, "rpcn", 2, nil, true)
+	certPath, keyPath := writePair(t, dir, "client.pem", "client.key", firstPEM, firstKey)
+
+	c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+  skip_cert_verify: true
+  client_certs:
+    - cert_file: `+certPath+`
+      key_file: `+keyPath+`
+cert_refresh_interval: 20ms
+`)
+	require.NoError(t, err)
+	stop := c.tlsRefresh.start(nil)
+	defer stop()
+
+	require.NoError(t, os.WriteFile(certPath, secondPEM, 0o600))
+	require.NoError(t, os.WriteFile(keyPath, secondKey, 0o600))
+
+	require.Eventually(t, func() bool {
+		got, err := c.Policy.TlsConfig.GetClientCertificate(nil)
+		if err != nil || len(got.Certificate) == 0 {
+			return false
+		}
+		leaf, err := x509.ParseCertificate(got.Certificate[0])
+		return err == nil && big.NewInt(2).Cmp(leaf.SerialNumber) == 0
+	}, time.Second, 10*time.Millisecond, "poller did not reload the client certificate on its own")
+}
+
+// connect calls startTLSRefresh on every successful (re)connect; close stops
+// it and clears refreshStop so a later connect can start a fresh poller. This
+// exercises that wiring directly rather than through a live cluster, which
+// start and stop do not otherwise need.
+func TestConnectionTLSRefreshStartStopWiring(t *testing.T) {
+	dir := t.TempDir()
+	_, certPEM, keyPEM := leafCert(t, nil, nil, "rpcn", 1, nil, true)
+	certPath, keyPath := writePair(t, dir, "client.pem", "client.key", certPEM, keyPEM)
+
+	c, err := parseClientYAML(t, `
+hosts: ["127.0.0.1:1"]
+tls:
+  enabled: true
+  skip_cert_verify: true
+  client_certs:
+    - cert_file: `+certPath+`
+      key_file: `+keyPath+`
+cert_refresh_interval: 20ms
+`)
+	require.NoError(t, err)
+	require.NotNil(t, c.tlsRefresh)
+
+	conn := newConnection(c, nil)
+	conn.startTLSRefresh()
+	require.NotNil(t, conn.refreshStop)
+	assert.Equal(t, 1, c.tlsRefresh.refCount())
+
+	// A second call before close must not start a second poller.
+	conn.startTLSRefresh()
+	assert.Equal(t, 1, c.tlsRefresh.refCount())
+
+	require.NoError(t, conn.close(t.Context()))
+	assert.Nil(t, conn.refreshStop)
+	assert.Equal(t, 0, c.tlsRefresh.refCount())
 }
 
 func TestCertRefreshPollerStops(t *testing.T) {
