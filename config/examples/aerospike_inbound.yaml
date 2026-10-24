@@ -72,7 +72,7 @@ output:
             # cert_refresh_interval: 1h
             # Re-reads those same files when their contents change. A different filename
             # is a config change. Connections already open keep their current session.
-            # An IP seed needs cluster_name or a tlsname on the host.
+            # With root_cas_file set, an IP seed needs cluster_name or a tlsname on the host.
             # ciphers is the TLS 1.2 allow-list. Empty leaves the tls default.
             # It applies only when tls.enabled is true. TLS 1.3 suites stay on
             # unless protocols is TLSv1.2. ciphers with protocols: [TLSv1.3]

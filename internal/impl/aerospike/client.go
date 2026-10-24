@@ -139,7 +139,7 @@ func clientFields() []*service.ConfigField {
 		service.NewTLSToggledField(aoFieldTLS),
 
 		service.NewDurationField(aoFieldCertRefreshInterval).
-			Description("How often to re-read `tls.root_cas_file` and the `cert_file` and `key_file` paths under `tls.client_certs`. The paths do not change; only new contents of those files are picked up, and only by connections opened after the next check. Connections already in the pool stay up until they close on their own. A file that cannot be read or parsed is skipped and the previous material stays in use. Inline PEM values are not re-read. `0s` disables the check. When the interval is positive, an IP seed host needs `cluster_name` or a tlsname on the host, because a bare IP is not sent as the TLS server name.").
+			Description("How often to re-read `tls.root_cas_file` and the `cert_file` and `key_file` paths under `tls.client_certs`. The paths do not change; only new contents of those files are picked up, and only by connections opened after the next check. Connections already in the pool stay up until they close on their own. A file that cannot be read or parsed is skipped and the previous material stays in use. Inline PEM values are not re-read. `0s` disables the check. When the interval is positive and `tls.root_cas_file` is set, an IP seed host needs `cluster_name` or a tlsname on the host, because a bare IP is not sent as the TLS server name. Refreshing only client certificates, or setting `tls.skip_cert_verify`, has no such requirement.").
 			Default("0s").
 			Advanced(),
 
