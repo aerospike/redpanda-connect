@@ -16,8 +16,14 @@ package aerospike
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"slices"
@@ -747,9 +753,9 @@ func resolveTLSCA(t *testing.T, ca string) string {
 }
 
 // tlsMaterial is the secured Enterprise node. The TLS port requires a client
-// certificate (tls-authenticate-client any). client.pem is the CN rpcn
-// certificate used with password login.
-func tlsMaterial(t *testing.T) (host, ca, cert, key string) {
+// certificate (tls-authenticate-client any). client.pem is CN rpcn.
+// client.enc.key is that key encrypted with password rpcnkey.
+func tlsMaterial(t *testing.T) (host, ca, cert, key, encKey string) {
 	t.Helper()
 	host = os.Getenv("AEROSPIKE_TLS_HOST")
 	caEnv := os.Getenv("AEROSPIKE_TLS_CA")
@@ -760,28 +766,34 @@ func tlsMaterial(t *testing.T) (host, ca, cert, key string) {
 	dir := filepath.Dir(ca)
 	cert = filepath.Join(dir, "client.pem")
 	key = filepath.Join(dir, "client.key")
+	encKey = filepath.Join(dir, "client.enc.key")
 	require.FileExists(t, cert, "run testdata/ee/gen-certs.sh; the TLS port requires a client certificate")
 	require.FileExists(t, key)
+	require.FileExists(t, encKey)
 	ensureSecUser(t)
-	return host, ca, cert, key
+	return host, ca, cert, key, encKey
 }
 
-func tlsClientYAML(ca, cert, key string) string {
+func tlsClientYAML(ca, cert, key, keyPassword string) string {
+	passwordLine := ""
+	if keyPassword != "" {
+		passwordLine = "\n      password: " + keyPassword
+	}
 	return `
 tls:
   enabled: true
   root_cas_file: ` + ca + `
   client_certs:
     - cert_file: ` + cert + `
-      key_file: ` + key + `
+      key_file: ` + key + passwordLine + `
 `
 }
 
 // TLS needs the host spec to carry the server's tls-name, which is the
 // host:tlsname:port form the connector documents. Login is still the
-// internal password; the client certificate satisfies mutual TLS.
+// internal password. The client certificate satisfies mutual TLS.
 func TestEETLS(t *testing.T) {
-	host, ca, cert, key := tlsMaterial(t)
+	host, ca, cert, key, _ := tlsMaterial(t)
 
 	yaml := `
 hosts: [ "` + host + `" ]
@@ -793,7 +805,7 @@ auth_mode: internal
 credentials:
   username: rpcn
   password: rpcnpass
-` + tlsClientYAML(ca, cert, key)
+` + tlsClientYAML(ca, cert, key, "")
 	w := newTestWriter(t, yaml)
 	t.Cleanup(func() { _ = w.Close(context.Background()) })
 
@@ -803,11 +815,211 @@ credentials:
 	}))
 }
 
+// The TLS listener requires a client certificate. A trusted CA and a
+// password are not enough.
+func TestEETLSRejectsMissingClientCert(t *testing.T) {
+	host, ca, _, _, _ := tlsMaterial(t)
+
+	yaml := `
+hosts: [ "` + host + `" ]
+namespace: ` + eeAPNamespace + `
+set: ` + eeSet + `
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+auth_mode: internal
+credentials:
+  username: rpcn
+  password: rpcnpass
+tls:
+  enabled: true
+  root_cas_file: ` + ca + `
+`
+	w := newTestWriter(t, yaml)
+	t.Cleanup(func() { _ = w.Close(context.Background()) })
+
+	require.Error(t, w.Connect(t.Context()), "a connection with no client certificate must be refused")
+}
+
+// client.enc.key is client.key wrapped as encrypted PKCS#8. The password
+// decrypts it before the handshake. The server still sees the rpcn certificate.
+func TestEETLSEncryptedKey(t *testing.T) {
+	host, ca, cert, _, encKey := tlsMaterial(t)
+
+	yaml := `
+hosts: [ "` + host + `" ]
+namespace: ` + eeAPNamespace + `
+set: ` + eeSet + `
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+auth_mode: internal
+credentials:
+  username: rpcn
+  password: rpcnpass
+` + tlsClientYAML(ca, cert, encKey, "rpcnkey")
+	w := newTestWriter(t, yaml)
+	t.Cleanup(func() { _ = w.Close(context.Background()) })
+
+	require.NoError(t, w.Connect(t.Context()))
+	require.NoError(t, w.WriteBatch(t.Context(), service.MessageBatch{
+		msg(t, `{"id":"tls-enc","v":"encrypted-key"}`),
+	}))
+}
+
+// TestEETLSCertRefreshInsertsOnNewConnection replaces the client certificate
+// files while the output stays connected. The poller (cert_refresh_interval
+// 10s) loads the new files. The pooled connection, which still has the old
+// handshake, is discarded, and the next write opens a connection with the new
+// certificate and inserts a record. The output is not closed or connected again.
+func TestEETLSCertRefreshInsertsOnNewConnection(t *testing.T) {
+	host, caPath, _, _, _ := tlsMaterial(t)
+	caPEM, err := os.ReadFile(caPath)
+	require.NoError(t, err)
+	caKeyPEM, err := os.ReadFile(filepath.Join(filepath.Dir(caPath), "ca.key"))
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "client.pem")
+	keyPath := filepath.Join(dir, "client.key")
+	origCert, origKey := signEEClientCert(t, caPEM, caKeyPEM, 1)
+	require.NoError(t, os.WriteFile(certPath, origCert, 0o600))
+	require.NoError(t, os.WriteFile(keyPath, origKey, 0o600))
+
+	w := newTestWriter(t, `
+hosts: [ "`+host+`" ]
+namespace: `+eeAPNamespace+`
+set: `+eeSet+`
+key: '${! json("id") }'
+bins: 'root = this.without("id")'
+min_connections_per_node: 1
+auth_mode: internal
+credentials:
+  username: rpcn
+  password: rpcnpass
+tls:
+  enabled: true
+  root_cas_file: `+caPath+`
+  client_certs:
+    - cert_file: `+certPath+`
+      key_file: `+keyPath+`
+cert_refresh_interval: 10s
+`)
+	t.Cleanup(func() { _ = w.Close(context.Background()) })
+	require.NoError(t, w.Connect(t.Context()))
+	requireWrite(t, w, `{"id":"tls-refresh-old","v":"before"}`)
+	oldSerial := presentedSerial(t, w)
+
+	nextCert, nextKey := signEEClientCert(t, caPEM, caKeyPEM, 2)
+	require.NoError(t, os.WriteFile(certPath, nextCert, 0o600))
+	require.NoError(t, os.WriteFile(keyPath, nextKey, 0o600))
+
+	require.Eventually(t, func() bool {
+		return presentedSerial(t, w).Cmp(oldSerial) != 0
+	}, 25*time.Second, 200*time.Millisecond, "poller did not load the replacement client certificate")
+	assert.Equal(t, 0, presentedSerial(t, w).Cmp(big.NewInt(2)))
+
+	client := w.conn.asClient()
+	require.NotNil(t, client, "the output must stay connected across the refresh")
+	discardPooledConnections(t, client)
+
+	requireWrite(t, w, `{"id":"tls-refresh-new","v":"after"}`)
+
+	reader, err := as.NewClientWithPolicyAndHost(w.conf.client.Policy, w.conf.client.Hosts...)
+	require.NoError(t, err)
+	t.Cleanup(reader.Close)
+	rec := eeRead(t, reader, eeAPNamespace, "tls-refresh-new")
+	require.NotNil(t, rec)
+	assert.Equal(t, "after", rec.Bins["v"])
+}
+
+func requireWrite(t *testing.T, w *aerospikeWriter, body string) {
+	t.Helper()
+	batch := service.MessageBatch{msg(t, body)}
+	indexer := batch.Index()
+	err := w.WriteBatch(t.Context(), batch)
+	if err == nil {
+		return
+	}
+	require.NoError(t, firstIndexedError(t, indexer, err))
+}
+
+func presentedSerial(t *testing.T, w *aerospikeWriter) *big.Int {
+	t.Helper()
+	got, err := w.conf.client.Policy.TlsConfig.GetClientCertificate(nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, got.Certificate)
+	leaf, err := x509.ParseCertificate(got.Certificate[0])
+	require.NoError(t, err)
+	return leaf.SerialNumber
+}
+
+// discardPooledConnections closes connections that finished their handshake
+// before the certificate reload. The client then opens a replacement, and that
+// handshake presents whatever GetClientCertificate returns now.
+func discardPooledConnections(t *testing.T, client *as.Client) {
+	t.Helper()
+	for _, node := range client.GetNodes() {
+		for {
+			conn, err := node.GetConnection(20 * time.Millisecond)
+			if err != nil || conn == nil {
+				break
+			}
+			node.InvalidateConnection(conn)
+		}
+		require.Eventually(t, func() bool {
+			conn, err := node.GetConnection(200 * time.Millisecond)
+			if err != nil || conn == nil {
+				return false
+			}
+			node.PutConnection(conn)
+			return true
+		}, 15*time.Second, 100*time.Millisecond, "node %s did not open a connection after the certificate refresh", node.GetName())
+	}
+}
+
+func signEEClientCert(t *testing.T, caPEM, caKeyPEM []byte, serial int64) (certPEM, keyPEM []byte) {
+	t.Helper()
+	ca, caKey := parseEECA(t, caPEM, caKeyPEM)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(serial),
+		Subject:      pkix.Name{CommonName: "rpcn"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
+	require.NoError(t, err)
+	keyDER := x509.MarshalPKCS1PrivateKey(key)
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: keyDER})
+}
+
+func parseEECA(t *testing.T, caPEM, caKeyPEM []byte) (*x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+	block, _ := pem.Decode(caPEM)
+	require.NotNil(t, block, "ca.pem is not PEM")
+	ca, err := x509.ParseCertificate(block.Bytes)
+	require.NoError(t, err)
+
+	keyBlock, _ := pem.Decode(caKeyPEM)
+	require.NotNil(t, keyBlock, "ca.key is not PEM")
+	if key, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err == nil {
+		return ca, key
+	}
+	key, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	require.NoError(t, err)
+	rsaKey, ok := key.(*rsa.PrivateKey)
+	require.True(t, ok, "ca.key is not an RSA private key")
+	return ca, rsaKey
+}
+
 // PKI login sends no password. The certificate CN is the username rpcn.
 // This tools image cannot create a PKI-only user; show users lists rpcn
 // as password,PKI, so the same client certificate is used.
 func TestEEAuthPKI(t *testing.T) {
-	host, ca, cert, key := tlsMaterial(t)
+	host, ca, cert, key, _ := tlsMaterial(t)
 
 	yaml := `
 hosts: [ "` + host + `" ]
@@ -816,7 +1028,7 @@ set: ` + eeSet + `
 key: '${! json("id") }'
 bins: 'root = this.without("id")'
 auth_mode: pki
-` + tlsClientYAML(ca, cert, key)
+` + tlsClientYAML(ca, cert, key, "")
 	w := newTestWriter(t, yaml)
 	t.Cleanup(func() { _ = w.Close(context.Background()) })
 	require.NoError(t, w.Connect(t.Context()))
@@ -835,7 +1047,7 @@ auth_mode: pki
 // This cluster has no LDAP service. External login must reach the server
 // over TLS and be refused, rather than fall back to the internal password.
 func TestEEAuthExternalRejected(t *testing.T) {
-	host, ca, cert, key := tlsMaterial(t)
+	host, ca, cert, key, _ := tlsMaterial(t)
 
 	yaml := `
 hosts: [ "` + host + `" ]
@@ -848,7 +1060,7 @@ auth_mode: external
 credentials:
   username: ldap-user
   password: secret
-` + tlsClientYAML(ca, cert, key)
+` + tlsClientYAML(ca, cert, key, "")
 	w := newTestWriter(t, yaml)
 	t.Cleanup(func() { _ = w.Close(context.Background()) })
 

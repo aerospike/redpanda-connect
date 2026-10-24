@@ -62,6 +62,9 @@ func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (ser
 	if names := parsed.client.insecureCiphers; len(names) > 0 {
 		mgr.Logger().Warnf("field '%s' includes insecure cipher suites: %s", aoFieldCiphers, strings.Join(names, ", "))
 	}
+	if parsed.client.certRefreshIneffective {
+		mgr.Logger().Warnf("field '%s' has no effect: '%s.enabled' is false, or every certificate is inline PEM rather than a file path", aoFieldCertRefreshInterval, aoFieldTLS)
+	}
 
 	return &aerospikeWriter{
 		conf:        parsed,

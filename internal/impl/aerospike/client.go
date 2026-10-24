@@ -45,6 +45,7 @@ const (
 	aoFieldCredentialsPassword     = "password"
 	aoFieldCredentialsPasswordFile = "password_file"
 	aoFieldTLS                     = "tls"
+	aoFieldCertRefreshInterval     = "cert_refresh_interval"
 	aoFieldCiphers                 = "ciphers"
 	aoFieldProtocols               = "protocols"
 	aoFieldRevokeCertificates      = "revoke_certificates"
@@ -136,6 +137,11 @@ func clientFields() []*service.ConfigField {
 
 		service.NewTLSToggledField(aoFieldTLS),
 
+		service.NewDurationField(aoFieldCertRefreshInterval).
+			Description("How often to re-read `tls.root_cas_file` and the `cert_file` and `key_file` paths under `tls.client_certs`. The paths do not change; only new contents of those files are picked up, and only by connections opened after the next check. Connections already in the pool stay up until they close on their own. A file that cannot be read or parsed is skipped and the previous material stays in use. Inline PEM values are not re-read. `0s` disables the check. When the interval is positive and `tls.root_cas_file` is set, an IP seed host needs `cluster_name` or a tlsname on the host, because a bare IP is not sent as the TLS server name. Refreshing only client certificates, or setting `tls.skip_cert_verify`, has no such requirement.").
+			Default("0s").
+			Advanced(),
+
 		service.NewStringListField(aoFieldCiphers).
 			Description("TLS 1.2 cipher suites to offer, as IANA names such as `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. Empty leaves the suites selected by `tls`. Names are matched case-insensitively, and a name Go does not implement is rejected at startup. A suite Go marks insecure is accepted when it is named, so the list can match a server that still requires it, and startup logs a warning for each one. TLS 1.3 suites cannot be named here. They stay offered unless `protocols` is `TLSv1.2`. Naming `ciphers` when `protocols` offers TLS 1.3 only fails startup. Requires `tls.enabled`.").
 			Default([]string{}).
@@ -161,8 +167,13 @@ type clientConfig struct {
 	Hosts               []*as.Host
 	Policy              *as.ClientPolicy
 	WarmUp              bool
+	tlsRefresh          *tlsRefresher
 	insecureCiphers     []string
 	ignoredPasswordFile bool
+	// certRefreshIneffective is set when cert_refresh_interval is positive but
+	// there is nothing for it to do: TLS is off, or every certificate it would
+	// watch is inline PEM rather than a file path.
+	certRefreshIneffective bool
 }
 
 // sizePoolForConcurrency gives the connection pool a floor matching the number
@@ -326,6 +337,21 @@ func parseClientConfig(conf *service.ParsedConfig) (*clientConfig, error) {
 		c.Policy.TlsConfig = tlsConf
 	}
 
+	interval, err := conf.FieldDuration(aoFieldCertRefreshInterval)
+	if err != nil {
+		return nil, err
+	}
+	if interval < 0 {
+		return nil, fmt.Errorf("field '%v' must not be negative", aoFieldCertRefreshInterval)
+	}
+	if tlsEnabled && interval > 0 {
+		c.tlsRefresh, err = newTLSRefresher(conf, tlsConf, c.Hosts, c.Policy.ClusterName, interval)
+		if err != nil {
+			return nil, err
+		}
+	}
+	c.certRefreshIneffective = interval > 0 && c.tlsRefresh == nil
+
 	return c, nil
 }
 
@@ -464,9 +490,9 @@ type connection struct {
 	conf *clientConfig
 	log  *service.Logger
 
-	mu     sync.RWMutex
-	client *as.Client
-
+	mu                    sync.RWMutex
+	client                *as.Client
+	refreshStop           func()
 	warnedIgnoredPassword bool
 }
 
@@ -485,6 +511,7 @@ func (c *connection) connect(ctx context.Context) error {
 	defer c.mu.Unlock()
 
 	if c.client != nil && c.client.IsConnected() {
+		c.startTLSRefresh()
 		return nil
 	}
 	if c.client != nil {
@@ -544,6 +571,7 @@ func (c *connection) connect(ctx context.Context) error {
 			return fmt.Errorf("connecting to aerospike cluster: %w", o.err)
 		}
 		c.client = o.client
+		c.startTLSRefresh()
 		if c.log != nil {
 			c.log.Infof("Connected to Aerospike cluster with %v node(s)", len(o.client.GetNodes()))
 		}
@@ -557,7 +585,12 @@ func (c *connection) close(ctx context.Context) error {
 	c.mu.Lock()
 	client := c.client
 	c.client = nil
+	stopRefresh := c.refreshStop
+	c.refreshStop = nil
 	c.mu.Unlock()
+	if stopRefresh != nil {
+		stopRefresh()
+	}
 	if client == nil {
 		return nil
 	}
@@ -573,6 +606,15 @@ func (c *connection) close(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// startTLSRefresh starts the certificate poller once for this connection.
+// The caller holds c.mu. Reloading certificates does not close the client.
+func (c *connection) startTLSRefresh() {
+	if c.conf == nil || c.conf.tlsRefresh == nil || c.refreshStop != nil {
+		return
+	}
+	c.refreshStop = c.conf.tlsRefresh.start(c.log)
 }
 
 // asClient returns the live client, or nil when the component is not connected.
