@@ -459,10 +459,10 @@ func (m *batchMapper) mapMessage(index int) (*pendingOp, error) {
 
 	if m.conf.fenceEnabled && kind != opReplace && kind != opReplaceOnly && kind != opCreateOnly {
 		// UPDATE merges. A prior fenced delete left a tombstone bin that must
-		// be removed or readers will still treat the record as missing.
-		// replace and replace_only delete bins they do not name, and
-		// create_only fails while the tombstone record exists, so those three
-		// do not clear it here.
+		// be removed or readers, including aerospike_lookup, will still treat
+		// the record as missing. replace and replace_only delete bins they do
+		// not name, and create_only fails while the tombstone record exists,
+		// so those three do not clear it here.
 		op.setBin(m.conf.tombstoneBin, nil)
 	}
 

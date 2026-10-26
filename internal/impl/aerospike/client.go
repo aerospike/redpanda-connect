@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package aerospike implements an Aerospike output.
+// Package aerospike implements an Aerospike output and lookup processor.
 package aerospike
 
 import (
@@ -192,6 +192,17 @@ func (c *clientConfig) sizePoolForConcurrency(concurrency int) {
 		return
 	}
 	c.Policy.MinConnectionsPerNode = min(concurrency, c.Policy.ConnectionQueueSize)
+}
+
+// warnStartup logs client settings that are accepted but weaken or have no
+// effect, once when the component is created.
+func (c *clientConfig) warnStartup(log *service.Logger) {
+	if len(c.insecureCiphers) > 0 {
+		log.Warnf("field '%s' includes insecure cipher suites: %s", aoFieldCiphers, strings.Join(c.insecureCiphers, ", "))
+	}
+	if c.certRefreshIneffective {
+		log.Warnf("field '%s' has no effect: '%s.enabled' is false, or every certificate is inline PEM rather than a file path", aoFieldCertRefreshInterval, aoFieldTLS)
+	}
 }
 
 // parseClientConfig reads the fields produced by clientFields.

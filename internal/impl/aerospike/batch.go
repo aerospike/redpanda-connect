@@ -30,9 +30,15 @@ const (
 	aoFieldMaxRetries      = "max_retries"
 )
 
-// batchPolicyFieldsWithRetries returns the Aerospike batch-command fields with
-// an explicit retry default. Writes should pass 0: create_only is not safe to
-// repeat, and a retry after an uncertain timeout can insert a second record.
+// batchPolicyFields returns the Aerospike batch-command fields shared by the
+// output and the lookup processor. Reads default to two retries.
+func batchPolicyFields() []*service.ConfigField {
+	return batchPolicyFieldsWithRetries(2)
+}
+
+// batchPolicyFieldsWithRetries is batchPolicyFields with an explicit retry
+// default. Writes should pass 0: create_only is not safe to repeat, and a
+// retry after an uncertain timeout can insert a second record.
 func batchPolicyFieldsWithRetries(maxRetries int) []*service.ConfigField {
 	retryDesc := "Client-side retries per batch command."
 	if maxRetries == 0 {
@@ -64,7 +70,7 @@ func batchPolicyFieldsWithRetries(maxRetries int) []*service.ConfigField {
 	}
 }
 
-// parseBatchPolicy reads the fields produced by batchPolicyFieldsWithRetries.
+// parseBatchPolicy reads the fields produced by batchPolicyFields.
 func parseBatchPolicy(conf *service.ParsedConfig) (*as.BatchPolicy, error) {
 	p := as.NewBatchPolicy()
 
