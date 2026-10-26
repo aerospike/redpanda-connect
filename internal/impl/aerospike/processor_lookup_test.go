@@ -15,6 +15,10 @@
 package aerospike
 
 import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"log/slog"
 	"testing"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
@@ -110,6 +114,56 @@ func TestConfigRejectsLongBinName(t *testing.T) {
 	_, err = parseLookupConfig(conf)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds the Aerospike limit of 15")
+}
+
+func TestLookupRequiresUserKey(t *testing.T) {
+	// digest is an output field. Lookup still requires a user key, and a digest
+	// value does not satisfy that requirement.
+	_, err := lookupSpec().ParseYAML(`
+hosts: [ "localhost:3000" ]
+namespace: test
+digest: '${! json("digest") }'
+`, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "field 'key' is required")
+}
+
+func TestLookupWarnsAtStartup(t *testing.T) {
+	insecure := suiteNamed(t, tls.InsecureCipherSuites(), "TLS_RSA_WITH_AES_128_CBC_SHA")
+
+	tests := []struct {
+		name  string
+		extra string
+		want  []string
+	}{
+		{
+			name:  "insecure cipher suite",
+			extra: "tls:\n  enabled: true\nciphers: [ \"" + insecure.Name + "\" ]\n",
+			want:  []string{"insecure cipher suites", insecure.Name},
+		},
+		{
+			name:  "cert refresh without a certificate file",
+			extra: "cert_refresh_interval: 1h\n",
+			want:  []string{"cert_refresh_interval", "has no effect"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := service.NewLoggerFromSlog(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			mgr := service.MockResources(service.MockResourcesOptUseLogger(logger))
+
+			conf, err := lookupSpec().ParseYAML(lookupBaseConfig+tc.extra, nil)
+			require.NoError(t, err)
+			p, err := newLookupProcessor(conf, mgr)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = p.Close(context.Background()) })
+
+			for _, want := range tc.want {
+				assert.Contains(t, buf.String(), want)
+			}
+		})
+	}
 }
 
 func TestAssembleRemovesDropped(t *testing.T) {

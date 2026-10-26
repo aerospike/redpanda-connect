@@ -1609,7 +1609,7 @@ func TestIntegrationLookupHidesFencingBins(t *testing.T) {
 	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][0]))
 }
 
-func TestIntegrationSelectedBinsOnly(t *testing.T) {
+func TestIntegrationLookupSelectedBinsOnly(t *testing.T) {
 	p, client := lookupSetup(t, "bins: [ tier ]\n")
 
 	seed(t, client, "u1", as.BinMap{"tier": "gold", "ltv": 4200})
@@ -1621,7 +1621,7 @@ func TestIntegrationSelectedBinsOnly(t *testing.T) {
 	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][0]))
 }
 
-func TestIntegrationDeduplicatedFanOut(t *testing.T) {
+func TestIntegrationLookupDeduplicatedFanOut(t *testing.T) {
 	p, client := lookupSetup(t, "")
 
 	seed(t, client, "u1", as.BinMap{"tier": "gold"})
@@ -1642,7 +1642,7 @@ func TestIntegrationDeduplicatedFanOut(t *testing.T) {
 	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][2]))
 }
 
-func TestIntegrationNestedCDTsBecomeJSON(t *testing.T) {
+func TestIntegrationLookupNestedCDTsBecomeJSON(t *testing.T) {
 	p, client := lookupSetup(t, "")
 
 	seed(t, client, "u1", as.BinMap{
@@ -1663,10 +1663,10 @@ func TestIntegrationNestedCDTsBecomeJSON(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestIntegrationKeyOrderedMapBecomesJSON seeds a map the way Java and Python
-// clients commonly write it, with MapPolicy KEY_ORDERED. The client unpacks
-// that as []as.MapPair, and the nested value as map[any]any.
-func TestIntegrationKeyOrderedMapBecomesJSON(t *testing.T) {
+// TestIntegrationLookupKeyOrderedMapBecomesJSON seeds a map the way Java and
+// Python clients commonly write it, with MapPolicy KEY_ORDERED. The client
+// unpacks that as []as.MapPair, and the nested value as map[any]any.
+func TestIntegrationLookupKeyOrderedMapBecomesJSON(t *testing.T) {
 	p, client := lookupSetup(t, "")
 
 	key, asErr := as.NewKey(integrationNamespace, integrationLookupSet, "ordered")
@@ -1701,7 +1701,7 @@ func TestIntegrationKeyOrderedMapBecomesJSON(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestIntegrationNotFoundNull(t *testing.T) {
+func TestIntegrationLookupNotFoundNull(t *testing.T) {
 	p, _ := lookupSetup(t, "")
 
 	out, err := p.ProcessBatch(t.Context(),
@@ -1713,7 +1713,7 @@ func TestIntegrationNotFoundNull(t *testing.T) {
 	assert.NoError(t, out[0][0].GetError())
 }
 
-func TestIntegrationNotFoundDrop(t *testing.T) {
+func TestIntegrationLookupNotFoundDrop(t *testing.T) {
 	p, client := lookupSetup(t, "not_found: drop\n")
 
 	seed(t, client, "u1", as.BinMap{"tier": "gold"})
@@ -1730,7 +1730,7 @@ func TestIntegrationNotFoundDrop(t *testing.T) {
 	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][0]))
 }
 
-func TestIntegrationNotFoundError(t *testing.T) {
+func TestIntegrationLookupNotFoundError(t *testing.T) {
 	p, _ := lookupSetup(t, "not_found: error\n")
 
 	out, err := p.ProcessBatch(t.Context(),
@@ -1740,7 +1740,7 @@ func TestIntegrationNotFoundError(t *testing.T) {
 	require.Error(t, out[0][0].GetError())
 }
 
-func TestIntegrationEmitsMetadata(t *testing.T) {
+func TestIntegrationLookupEmitsMetadata(t *testing.T) {
 	p, client := lookupSetup(t, "emit_metadata: true\n")
 
 	key, err := as.NewKey(integrationNamespace, integrationLookupSet, "u1")
@@ -1765,7 +1765,7 @@ func TestIntegrationEmitsMetadata(t *testing.T) {
 	assert.InDelta(t, 3600, parsed, 60)
 }
 
-func TestIntegrationKeyFailureIsolated(t *testing.T) {
+func TestIntegrationLookupKeyFailureIsolated(t *testing.T) {
 	p, client := lookupSetup(t, "")
 
 	seed(t, client, "u1", as.BinMap{"tier": "gold"})
@@ -1782,4 +1782,78 @@ func TestIntegrationKeyFailureIsolated(t *testing.T) {
 	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, out[0][0]))
 	require.Error(t, out[0][1].GetError())
 	assert.Contains(t, out[0][1].GetError().Error(), "not a usable record key")
+}
+
+// TestIntegrationLookupReadsOutputWrites runs the read-modify-write loop the
+// two components document together: records come from the output rather than a
+// raw client, both sides keep their default fence and tombstone bin names, and
+// the generation the lookup reports drives the output's compare-and-set.
+func TestIntegrationLookupReadsOutputWrites(t *testing.T) {
+	w, client := outputSetup(t, `
+operation: '${! meta("op").or("write") }'
+generation: '${! meta("aerospike_generation").or("") }'
+fencing:
+  enabled: true
+  value: '${! meta("off") }'
+`)
+	p := newTestProcessor(t, `
+hosts: [ "`+integrationHost(t)+`" ]
+namespace: `+integrationNamespace+`
+set: `+integrationOutputSet+`
+key: '${! json("id") }'
+emit_metadata: true
+`)
+	t.Cleanup(func() { _ = p.Close(context.Background()) })
+
+	write := func(body, off, gen, op string) error {
+		m := msg(t, body)
+		m.MetaSet("off", off)
+		if gen != "" {
+			m.MetaSet("aerospike_generation", gen)
+		}
+		if op != "" {
+			m.MetaSet("op", op)
+		}
+		return w.WriteBatch(t.Context(), service.MessageBatch{m})
+	}
+	lookup := func() *service.Message {
+		out, err := p.ProcessBatch(t.Context(), service.MessageBatch{msg(t, `{"id":"rt1"}`)})
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+		require.Len(t, out[0], 1)
+		require.NoError(t, out[0][0].GetError())
+		return out[0][0]
+	}
+
+	require.NoError(t, write(`{"id":"rt1","tier":"gold"}`, "1", "", ""))
+	require.Equal(t, 1, outputRead(t, client, "rt1").Bins[defaultFenceBin], "the output should have written the fence bin")
+
+	read := lookup()
+	assert.Equal(t, map[string]any{"tier": "gold"}, structured(t, read), "the fence bin must not reach the reader")
+	gen, ok := read.MetaGet(metaGeneration)
+	require.True(t, ok)
+	assert.Equal(t, "1", gen)
+
+	require.NoError(t, write(`{"id":"rt1","tier":"silver"}`, "2", gen, ""))
+
+	stale := msg(t, `{"id":"rt1","tier":"bronze"}`)
+	stale.MetaSet("off", "3")
+	stale.MetaSet("aerospike_generation", gen)
+	staleBatch := service.MessageBatch{stale}
+	indexer := staleBatch.Index()
+	err := w.WriteBatch(t.Context(), staleBatch)
+	require.Error(t, err)
+	assert.Contains(t, firstIndexedError(t, indexer, err).Error(), "generation check failed")
+
+	read = lookup()
+	assert.Equal(t, map[string]any{"tier": "silver"}, structured(t, read))
+	gen, _ = read.MetaGet(metaGeneration)
+	assert.Equal(t, "2", gen)
+
+	require.NoError(t, write(`{"id":"rt1"}`, "4", "", "delete"))
+	rec := outputRead(t, client, "rt1")
+	require.NotNil(t, rec, "a fenced delete leaves a tombstone record")
+	assert.Equal(t, true, rec.Bins[defaultTombstoneBin])
+
+	assert.Nil(t, structured(t, lookup()), "the lookup must report a tombstone as not found")
 }
