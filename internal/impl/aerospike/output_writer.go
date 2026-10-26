@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
@@ -59,12 +58,7 @@ func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (ser
 		return nil, batchPolicy, 0, err
 	}
 	parsed.client.sizePoolForConcurrency(maxInFlight)
-	if names := parsed.client.insecureCiphers; len(names) > 0 {
-		mgr.Logger().Warnf("field '%s' includes insecure cipher suites: %s", aoFieldCiphers, strings.Join(names, ", "))
-	}
-	if parsed.client.certRefreshIneffective {
-		mgr.Logger().Warnf("field '%s' has no effect: '%s.enabled' is false, or every certificate is inline PEM rather than a file path", aoFieldCertRefreshInterval, aoFieldTLS)
-	}
+	parsed.client.warnStartup(mgr.Logger())
 
 	return &aerospikeWriter{
 		conf:        parsed,

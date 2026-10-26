@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+
+	as "github.com/aerospike/aerospike-client-go/v8"
 )
 
 // maxBinNameLen is a hard server limit. Exceeding it is rejected with
@@ -27,12 +29,29 @@ import (
 const maxBinNameLen = 15
 
 // defaultTombstoneBin marks a fenced delete. The record is kept so the fence
-// survives; readers should treat a record carrying this bin as missing.
+// survives; readers, including aerospike_lookup, treat a record carrying this
+// bin as missing.
 const defaultTombstoneBin = "_deleted"
 
 // defaultFenceBin holds the monotonic fence value written alongside a record.
-// It is bookkeeping rather than data.
+// It is bookkeeping rather than data, so aerospike_lookup strips it.
 const defaultFenceBin = "_fence"
+
+// isFencedTombstone reports whether bins represent a fenced delete rather than a
+// live record. A missing or nil/false value is not a tombstone.
+func isFencedTombstone(bins map[string]any, bin string) bool {
+	if bin == "" || bins == nil {
+		return false
+	}
+	v, ok := bins[bin]
+	if !ok || v == nil {
+		return false
+	}
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return true
+}
 
 // validateBinName checks a bin name against the server's length limit, so the
 // error can name the field that produced it rather than surfacing as a
@@ -119,6 +138,51 @@ func convertFloat(f float64, coerceInts bool) any {
 	return int64(f)
 }
 
+// fromAerospike converts a value read back from a record into something that
+// can be serialised as JSON.
+//
+// The conversion is not cosmetic: Aerospike map keys are not restricted to
+// strings, so a map bin unpacks as map[any]any, which encoding/json cannot
+// marshal at all. Keys are stringified, which is lossy for exotic key types but
+// is the only representation JSON has.
+//
+// A key-ordered map unpacks as []as.MapPair instead. Left alone it would
+// serialise as a list of {Key, Value} structs, or fail outright if a value
+// holds a map[any]any.
+func fromAerospike(v any) any {
+	switch t := v.(type) {
+	case map[any]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[stringifyKey(k)] = fromAerospike(val)
+		}
+		return out
+	case []as.MapPair:
+		out := make(map[string]any, len(t))
+		for _, p := range t {
+			out[stringifyKey(p.Key)] = fromAerospike(p.Value)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[k] = fromAerospike(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = fromAerospike(val)
+		}
+		return out
+	case []byte:
+		// Leave as bytes; the JSON encoder will base64 it, which round-trips.
+		return t
+	default:
+		return v
+	}
+}
+
 // estimateSize returns a conservative byte count for a value about to be stored
 // as a bin. It is not the on-wire size — it exists so a mapping can be rejected
 // before the server returns RECORD_TOO_BIG. Nested lists and maps are walked
@@ -149,5 +213,16 @@ func estimateSize(v any) int {
 		return n
 	default:
 		return len(fmt.Sprint(t))
+	}
+}
+
+func stringifyKey(k any) string {
+	switch t := k.(type) {
+	case string:
+		return t
+	case []byte:
+		return string(t)
+	default:
+		return fmt.Sprint(t)
 	}
 }

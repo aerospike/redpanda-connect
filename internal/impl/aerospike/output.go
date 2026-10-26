@@ -95,8 +95,8 @@ Treat ` + "`bins`" + ` as a schema contract the server will not enforce: keep bi
 stable, and cap nested lists and maps in Bloblang (` + "`this.events.slice(0, 100)`" + `). Aerospike
 rewrites the entire record on every update, so the bulk of records should stay in
 single-digit KiB. Sets are a name, not a shard key. Do not interpolate an unbounded
-value. A small fixed list of topic names is fine. Readers address records by primary key, so do
-not rely on the data being queryable as a join.
+value. A small fixed list of topic names is fine. Readers, including ` + "`aerospike_lookup`" + `, address
+records by primary key, so do not rely on the data being queryable as a join.
 
 ### Batching and hot keys
 
@@ -199,7 +199,7 @@ The default is `+"`keep`"+` so a stream of updates does not reset or shorten voi
 			Example("keep"),
 
 		service.NewInterpolatedStringField(aoFieldGeneration).
-			Description("Expected record generation for a compare-and-set write. When set, the write fails if the stored generation does not match. Empty disables the check. The value is the generation the producer read the record at.\n\nA compare-and-set message is never coalesced, even with `coalesce_batch_keys` enabled: the check refers to the specific record that was read, and one command can carry only one expected generation. If several messages in a batch target the same key and any of them carries a generation, each is sent as its own command and the server arbitrates. On `GENERATION_ERROR` the correct recovery is to re-read the record and redo the change, not to retry the same write.").
+			Description("Expected record generation for a compare-and-set write. When set, the write fails if the stored generation does not match. Empty disables the check. The value is the generation the producer read the record at. Pair with `aerospike_lookup` `emit_metadata`, which sets `aerospike_generation` on the looked-up message.\n\nA compare-and-set message is never coalesced, even with `coalesce_batch_keys` enabled: the check refers to the specific record that was read, and one command can carry only one expected generation. If several messages in a batch target the same key and any of them carries a generation, each is sent as its own command and the server arbitrates. On `GENERATION_ERROR` the correct recovery is to re-read the record and redo the change, not to retry the same write.").
 			Default("").
 			Example(`${! meta("aerospike_generation") }`).
 			Advanced(),
@@ -264,7 +264,7 @@ A connection failure of the batch is still a failure. So is any mapping error ot
 				Description("Enable fencing.").
 				Default(false),
 			service.NewStringField(aoFieldFencingBin).
-				Description("Bin holding the fence value. Counts toward the 15 character bin name limit. Readers of these records should ignore it, since it is bookkeeping rather than data.").
+				Description("Bin holding the fence value. Counts toward the 15 character bin name limit. Readers of these records should ignore it, since it is bookkeeping rather than data. Must match `fence_bin` on `aerospike_lookup`, which strips it from the records it emits.").
 				Default(defaultFenceBin),
 			service.NewInterpolatedStringField(aoFieldFencingValue).
 				Description("An integer that increases monotonically for a given record key. The Kafka offset satisfies this when keys map to partitions consistently, which is the default partitioner's behaviour.").
@@ -272,7 +272,7 @@ A connection failure of the batch is still a failure. So is any mapping error ot
 				Example(`${! meta("kafka_timestamp_ms") }`).
 				Example(`${! json("version") }`),
 			service.NewStringField(aoFieldFencingTombstoneBin).
-				Description("Bin written on a fenced delete to mark the record as a tombstone. Readers should treat a record carrying this bin as missing. Counts toward the 15 character bin name limit.").
+				Description("Bin written on a fenced delete to mark the record as a tombstone. Readers should treat a record carrying this bin as missing, and `aerospike_lookup` does. Counts toward the 15 character bin name limit.").
 				Default(defaultTombstoneBin),
 			service.NewStringField(aoFieldFencingTombstoneTTL).
 				Description(`Time-to-live for fenced tombstone records. Accepts a duration, or `+"`never`"+`. Defaults to `+"`never`"+` so the fence outlives the data TTL; if the tombstone expires, a stale replay can recreate the record.
@@ -287,7 +287,7 @@ Those discards increment the `+"`aerospike_filtered_out`"+` counter and are logg
 
 When fencing is enabled, deletes do not remove the record: they replace it with the fence plus a
 tombstone bin, so a later replay cannot resurrect stale data. Readers should treat that tombstone
-as not found. `+"`create_only`"+` after a fenced delete fails because the tombstone still exists. `+"`replace_only`"+` succeeds and removes the tombstone, because the record is still there.`).
+as not found, and `+"`aerospike_lookup`"+` does. `+"`create_only`"+` after a fenced delete fails because the tombstone still exists. `+"`replace_only`"+` succeeds and removes the tombstone, because the record is still there.`).
 			Advanced(),
 
 		service.NewBatchPolicyField(aoFieldBatching).
