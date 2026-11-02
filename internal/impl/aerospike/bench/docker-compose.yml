@@ -1,0 +1,12 @@
+name: rpcn-aerospike-bench
+
+services:
+  aerospike:
+    image: aerospike/aerospike-server-enterprise:8.1
+    container_name: rpcn-aerospike-bench
+    hostname: rpcn-aerospike-bench
+    ports:
+      - "127.0.0.1:3310:3000"
+    volumes:
+      - ./aerospike.conf:/opt/rpcn/aerospike.conf:ro
+    command: ["--config-file", "/opt/rpcn/aerospike.conf"]

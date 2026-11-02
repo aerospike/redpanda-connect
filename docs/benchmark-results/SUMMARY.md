@@ -40,6 +40,7 @@ For full methodology, raw output, environment details, and bottleneck analysis, 
 - [Oracle CDC](oracledb-cdc.md)
 - [DynamoDB CDC](dynamodb-cdc.md)
 - [SAP HANA](sap-hana.md)
+- [Aerospike output](aerospike.md) — local smoke test only. It is not in the table above.
 
 <!-- bench:aws:start - auto-generated, do not edit by hand -->
 <!-- Copyright 2025 Redpanda Data, Inc. -->

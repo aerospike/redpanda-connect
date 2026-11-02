@@ -1,0 +1,46 @@
+version: "3"
+
+silent: true
+
+tasks:
+  up:
+    desc: Start the local single-node Enterprise server and wait until it answers
+    cmds:
+      - docker compose up -d
+      - until docker exec rpcn-aerospike-bench asinfo -v status 2>/dev/null | grep -q ok; do sleep 2; done
+      - echo "Aerospike Enterprise ready on 127.0.0.1:3310"
+
+  down:
+    desc: Stop the server and delete its data
+    cmds:
+      - docker compose down -v --remove-orphans
+
+  run:
+    desc: "Write COUNT records (task run COUNT=100000 BATCH=10 CORES=1)"
+    vars:
+      COUNT: '{{.COUNT | default "100000"}}'
+      BATCH: '{{.BATCH | default "10"}}'
+      PERIOD: '{{.PERIOD | default "200ms"}}'
+      CORES: '{{.CORES | default "1"}}'
+    env:
+      COUNT: "{{.COUNT}}"
+      BATCH: "{{.BATCH}}"
+      PERIOD: "{{.PERIOD}}"
+      GOMAXPROCS: "{{.CORES}}"
+    cmds:
+      - go run . run ./benchmark_config.yaml
+
+  bench:
+    desc: "Start the server, write COUNT records, then stop it"
+    vars:
+      COUNT: '{{.COUNT | default "100000"}}'
+      BATCH: '{{.BATCH | default "10"}}'
+      PERIOD: '{{.PERIOD | default "200ms"}}'
+      CORES: '{{.CORES | default "1"}}'
+    cmds:
+      - task: up
+      - |
+        status=0
+        task run COUNT="{{.COUNT}}" BATCH="{{.BATCH}}" PERIOD="{{.PERIOD}}" CORES="{{.CORES}}" || status=$?
+        task down || status=$?
+        exit "$status"
