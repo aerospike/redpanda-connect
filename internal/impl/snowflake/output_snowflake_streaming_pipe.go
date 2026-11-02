@@ -75,7 +75,9 @@ Ingest data into Snowflake using Snowpipe Streaming, writing through a Snowflake
 
 Unlike `+"`snowflake_streaming`"+`, which opens channels on a table, this output opens them on a pipe, so any transformation defined in the pipe's `+"`COPY INTO`"+` (stream-static join enrichment, `+"`WHERE`"+` filtering) runs before rows land. If you don't need those, `+"`snowflake_streaming`"+` is the simpler choice: it creates its table for you and needs no pipe.
 
-This is an Enterprise feature and requires a valid Redpanda Enterprise Edition license that includes Connect (https://docs.redpanda.com/redpanda-connect/get-started/licensing/[licensing docs^]).
+ifndef::env-cloud[]
+This is an Enterprise feature and requires a valid Redpanda Enterprise Edition license that includes Connect. See xref:get-started:licensing.adoc[Redpanda Connect licensing].
+endif::[]
 
 The `+"`"+ssopFieldPipe+"`"+` (and its table) must already exist; this output never issues `+"`CREATE PIPE`"+` or `+"`CREATE TABLE`"+`. A missing pipe is reported when the output connects, before any message is written. Fields with no matching column are dropped by Snowflake unless the table has `+"`ENABLE_SCHEMA_EVOLUTION = TRUE`"+` and the pipe uses `+"`MATCH_BY_COLUMN_NAME`"+`, in which case new fields become columns.
 
@@ -227,7 +229,7 @@ For more information about offset tokens, see https://docs.snowflake.com/en/user
 				Description(`Whether to tolerate rows Snowflake rejects after a batch is appended (malformed or uncastable values, reported asynchronously in the channel status). `+"`false`"+` (the default, matching the Kafka Connector's `+"`errors.tolerance=none`"+`) fails the batch with an error naming the channel and Snowflake's last error; `+"`true`"+` only logs a warning. Either way `+"`snowflake_rows_error_count`"+` is incremented and this output does not retry the rejected rows: Snowflake has already refused them and the redelivery dedupes to nothing, so failing the batch exists to alert an operator. To keep the rejected rows themselves, turn on error logging on the target table and Snowflake captures them in its error table; `+"`SNOWPIPE_STREAMING_CHANNEL_HISTORY`"+` has the error history with offsets (see https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-error-handling[error handling^]). When `+"`"+ssopFieldOffsetToken+"`"+` is unset such a rejection never fails the batch even with `+"`false`"+`, since without dedup a retry would only re-insert the good rows as duplicates.
 
 The same policy applies to a message this output cannot send at all: one that spans several lines but is not valid JSON (multi-line bodies are compacted to one NDJSON row each, so they must parse; a body holding several newline-separated documents becomes that many rows), or one whose body alone is over the 4 MB request limit after compression. Such a message is dropped rather than sent, and treated like a row Snowflake rejected: the batch's good rows land, `+"`snowflake_rows_error_count`"+` is incremented, and with `+"`"+ssopFieldOffsetToken+"`"+` set and `+"`false`"+` the batch fails once with the message number and parse error, after which its redelivery dedupes to nothing.`).
-				ShortDescription("Whether to tolerate rows Snowflake rejects (equivalent to the Kafka Connector's `errors.tolerance`); false (default) fails the batch, true only warns.").
+				ShortDescription("Whether to tolerate rows Snowflake rejects (equivalent to the Kafka Connector's errors.tolerance); false (default) fails the batch, true only warns.").
 				Default(false).
 				Advanced(),
 		).
