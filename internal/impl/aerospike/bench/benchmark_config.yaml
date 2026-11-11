@@ -1,11 +1,8 @@
 # Local write benchmark for output.aerospike.
-# Record shape matches the shared 512-byte loader profile used by
-# kafka-inbound and redpanda-inbound (name is 512 bytes; key, namespace,
-# and ttl are not stored as bins). Batching defaults match the GKE pipeline
-# in the aerospike-connect repository, perftests profile redpanda-inbound:
-# count 10, period 200ms.
-# This run has no broker. It writes to a single-node Enterprise server
-# and measures the output, not the full loader path.
+# The record is one 512-byte "name" bin. key, namespace, and ttl are not
+# stored as bins. The default batch is 10 records or 200ms.
+# There is no broker: generate writes straight to a single-node Enterprise
+# server, so the rate measured is the output's.
 
 http:
   enabled: true
