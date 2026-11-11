@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - aerospike: New `aerospike` output. ([@abhilashmandaliya](https://github.com/abhilashmandaliya), [#5020](https://github.com/redpanda-data/connect/pull/5020))
+- aerospike: New `aerospike_lookup` processor, which enriches messages with the Aerospike record they reference by key. ([@abhilashmandaliya](https://github.com/abhilashmandaliya))
+- aerospike: New `cert_refresh_interval` field reloads rotated TLS certificate files for new connections without closing open ones. ([@mphanias](https://github.com/mphanias))
 
 ## 4.117.0 - 2026-11-06
 
