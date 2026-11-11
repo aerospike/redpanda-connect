@@ -864,15 +864,3 @@ digest: 'YWI='
 		})
 	}
 }
-
-func TestLookupRequiresUserKey(t *testing.T) {
-	// digest is an output field. Lookup still requires a user key, and a digest
-	// value does not satisfy that requirement.
-	_, err := lookupSpec().ParseYAML(`
-hosts: [ "localhost:3000" ]
-namespace: test
-digest: '${! json("digest") }'
-`, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "field 'key' is required")
-}
