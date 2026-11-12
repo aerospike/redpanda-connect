@@ -34,7 +34,7 @@ cd internal/impl/aerospike/bench
 task bench COUNT=2000000 BATCH=10 CORES=1
 ```
 
-`task bench` starts the node, waits until the cluster reports stable, writes `COUNT` records, and removes the node even when the write fails.
+`task bench` starts the node, waits until the cluster reports stable, writes `COUNT` records, and removes the node even when the write fails. The wait gives up after 60 tries, about two minutes, and the task fails instead of hanging.
 
 | Variable | Default | What it sets |
 |---|---|---|
