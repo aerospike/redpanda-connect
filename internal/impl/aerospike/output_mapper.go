@@ -200,8 +200,9 @@ func (p *pendingOp) take(next *pendingOp) {
 //     result is a replace carrying both payloads. That is a compromise: the
 //     sequential outcomes disagree, and one command cannot fail either message.
 //
-// When both sides are fenced, a lower-fence payload is ignored — the server
-// would FILTERED_OUT it. A higher-fence payload is merged with the rules above
+// When both sides are fenced, a payload whose fence is not higher is ignored —
+// the server admits only a strictly greater fence and would FILTERED_OUT it.
+// A higher-fence payload is merged with the rules above
 // and carries that fence, so [write{a}@3, write{b}@10] stays write{a,b}@10
 // rather than replacing the payload with only {b}.
 //
@@ -211,7 +212,7 @@ func (p *pendingOp) take(next *pendingOp) {
 func (p *pendingOp) fold(next *pendingOp) {
 	p.indexes = append(p.indexes, next.indexes...)
 
-	if p.hasFence && next.hasFence && next.fence < p.fence {
+	if p.hasFence && next.hasFence && next.fence <= p.fence {
 		return
 	}
 
@@ -584,6 +585,9 @@ func (m *batchMapper) applyBins(op *pendingOp, index int) error {
 			}
 			return fmt.Errorf("%w; rename it in the '%v' mapping", err, aoFieldBins)
 		}
+		if field := m.fencingBinField(name); field != "" {
+			return fmt.Errorf("mapping in field '%v' produced bin %q, which is reserved by '%v.%v'; drop or rename it in the mapping, for example with this.without(%q)", aoFieldBins, name, aoFieldFencing, field, name)
+		}
 		value, err := toAerospike(obj[name], m.conf.coerceInts)
 		if err != nil {
 			return fmt.Errorf("bin %q: %w", name, err)
@@ -601,6 +605,23 @@ func (m *batchMapper) applyBins(op *pendingOp, index int) error {
 		}
 	}
 	return nil
+}
+
+// fencingBinField names the fencing field that owns bin name, or returns ""
+// when fencing is off or the name is free. Letting the mapping write these
+// bins would replace the fence the filter expression compares against, or
+// mark a live record as a tombstone.
+func (m *batchMapper) fencingBinField(name string) string {
+	if !m.conf.fenceEnabled {
+		return ""
+	}
+	switch name {
+	case m.conf.fenceBin:
+		return aoFieldFencingBin
+	case m.conf.tombstoneBin:
+		return aoFieldFencingTombstoneBin
+	}
+	return ""
 }
 
 // isTombstone reports whether a message carries no payload, which is the Kafka

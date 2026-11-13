@@ -264,15 +264,15 @@ A connection failure of the batch is still a failure. So is any mapping error ot
 				Description("Enable fencing.").
 				Default(false),
 			service.NewStringField(aoFieldFencingBin).
-				Description("Bin holding the fence value. Counts toward the 15 character bin name limit. Readers of these records should ignore it, since it is bookkeeping rather than data.").
+				Description("Bin holding the fence value. Counts toward the 15 character bin name limit. Readers of these records should ignore it, since it is bookkeeping rather than data. A message whose `bins` mapping produces this bin is rejected.").
 				Default(defaultFenceBin),
 			service.NewInterpolatedStringField(aoFieldFencingValue).
-				Description("An integer that increases monotonically for a given record key. The Kafka offset satisfies this when keys map to partitions consistently, which is the default partitioner's behaviour.").
+				Description("An integer that increases monotonically for a given record key. A message is written only when its value is strictly greater than the stored one, so a repeated value is discarded, including within one batch. The Kafka offset satisfies this when keys map to partitions consistently, which is the default partitioner's behaviour.").
 				Default(`${! meta("kafka_offset") }`).
 				Example(`${! meta("kafka_timestamp_ms") }`).
 				Example(`${! json("version") }`),
 			service.NewStringField(aoFieldFencingTombstoneBin).
-				Description("Bin written on a fenced delete to mark the record as a tombstone. Readers should treat a record carrying this bin as missing. Counts toward the 15 character bin name limit.").
+				Description("Bin written on a fenced delete to mark the record as a tombstone. Readers should treat a record carrying this bin as missing. Counts toward the 15 character bin name limit. A message whose `bins` mapping produces this bin is rejected.").
 				Default(defaultTombstoneBin),
 			service.NewStringField(aoFieldFencingTombstoneTTL).
 				Description(`Time-to-live for fenced tombstone records. Accepts a duration, or `+"`never`"+`. Defaults to `+"`never`"+` so the fence outlives the data TTL; if the tombstone expires, a stale replay can recreate the record.
