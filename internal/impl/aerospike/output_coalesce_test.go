@@ -433,6 +433,21 @@ func TestFoldKeepsHigherFence(t *testing.T) {
 	assert.Equal(t, true, newer.bins["_deleted"])
 }
 
+func TestFoldIgnoresEqualFence(t *testing.T) {
+	// The server admits only a strictly greater fence, so sequential
+	// write{a}@5 then write{b}@5 leaves {a}. Merging would also write {b}.
+	first := opWith(t, 0, "u1", opWrite, map[string]any{"a": 1})
+	first.hasFence, first.fence = true, 5
+	same := opWith(t, 1, "u1", opWrite, map[string]any{"b": 2})
+	same.hasFence, same.fence = true, 5
+
+	first.fold(same)
+	assert.Equal(t, opWrite, first.kind)
+	assert.Equal(t, int64(5), first.fence)
+	assert.Equal(t, map[string]any{"a": 1}, first.bins)
+	assert.Equal(t, []int{0, 1}, first.indexes)
+}
+
 func TestFoldMergesWhenHigherFenceArrivesLater(t *testing.T) {
 	// Sequential write{a}@3 then write{b}@10 leaves {a,b} under fence 10.
 	// Replacing the payload with only {b} would drop the first write.
