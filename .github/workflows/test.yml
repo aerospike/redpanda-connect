@@ -156,10 +156,11 @@ jobs:
   # result: Antora errors, broken anchors, and unconverted markup on the
   # pages the PR changes block. When the PR changes a published page, it
   # comments with the changed pages and a preview link, and asks the docs
-  # team to review. See docs/README.md.
+  # team to review. See docs/README.md. It clones Redpanda's private docs
+  # repositories, which only the upstream repository has credentials for.
   docs-check:
     needs: [docs, docs-base, docs-changed]
-    if: needs.docs-changed.outputs.changed == 'true'
+    if: github.repository == 'redpanda-data/connect' && needs.docs-changed.outputs.changed == 'true'
     permissions:
       contents: read
       id-token: write
