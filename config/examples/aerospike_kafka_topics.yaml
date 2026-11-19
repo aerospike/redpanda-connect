@@ -101,6 +101,9 @@ output:
             set: users
             key: '${! json("user_id") }'
             operation: delete
+            batching:
+              count: 256
+              period: 1s
 logger:
   level: INFO
   format: logfmt
