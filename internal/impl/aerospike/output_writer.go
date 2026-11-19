@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 
 	as "github.com/aerospike/aerospike-client-go/v8"
@@ -59,9 +58,6 @@ func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (ser
 		return nil, batchPolicy, 0, err
 	}
 	parsed.client.sizePoolForConcurrency(maxInFlight)
-	if names := parsed.client.insecureCiphers; len(names) > 0 {
-		mgr.Logger().Warnf("field '%s' includes insecure cipher suites: %s", aoFieldCiphers, strings.Join(names, ", "))
-	}
 
 	return &aerospikeWriter{
 		conf:        parsed,
