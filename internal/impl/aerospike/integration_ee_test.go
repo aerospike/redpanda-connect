@@ -977,7 +977,7 @@ cert_refresh_interval: 10s
 	client, release := w.conn.acquire()
 	t.Cleanup(release)
 	require.NotNil(t, client, "the output must stay connected across the refresh")
-	discardPooledConnections(t, client)
+	discardPooledConnections(t, client, w.conf.client.Policy.ConnectionQueueSize)
 
 	requireWrite(t, w, `{"id":"tls-refresh-new","v":"after"}`)
 
@@ -1013,10 +1013,14 @@ func presentedSerial(t *testing.T, w *aerospikeWriter) *big.Int {
 // discardPooledConnections closes connections that finished their handshake
 // before the certificate reload. The client then opens a replacement, and that
 // handshake presents whatever GetClientCertificate returns now.
-func discardPooledConnections(t *testing.T, client *as.Client) {
+//
+// GetConnection opens a new connection when the pool is empty, so draining
+// until it fails never ends on a host where the handshake is fast. A pool holds
+// at most poolSize connections, so taking that many removes every old one.
+func discardPooledConnections(t *testing.T, client *as.Client, poolSize int) {
 	t.Helper()
 	for _, node := range client.GetNodes() {
-		for {
+		for range poolSize {
 			conn, err := node.GetConnection(20 * time.Millisecond)
 			if err != nil || conn == nil {
 				break
