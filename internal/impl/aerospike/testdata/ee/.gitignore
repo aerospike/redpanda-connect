@@ -1,4 +1,3 @@
 features.conf
-certs/*
-!certs/.gitkeep
+certs/
 smd/

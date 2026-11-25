@@ -148,4 +148,4 @@ cd internal/impl/aerospike/testdata/ee
 docker compose down
 ```
 
-`features.conf` and `certs/*` (except `.gitkeep`) stay gitignored.
+`features.conf`, `certs/` and `smd/` stay gitignored.
