@@ -118,6 +118,7 @@ func clientFields() []*service.ConfigField {
 				Default("").
 				Secret(),
 			service.NewStringField(aoFieldCredentialsPasswordFile).
+				Version("4.121.0").
 				Description("File whose first line is the Aerospike password. The file is read once at startup, so a rotated password is picked up on the next restart. A trailing newline is not part of the password. Trailing spaces on the first line are kept. An empty first line fails startup. Set this or `password`, not both. A username with neither also fails startup. `pki` ignores this field. A missing or unreadable file fails startup. The file contents are not logged.").
 				Default("").
 				Example("/var/secrets/aerospike-password").
@@ -138,23 +139,27 @@ func clientFields() []*service.ConfigField {
 		service.NewTLSToggledField(aoFieldTLS),
 
 		service.NewDurationField(aoFieldCertRefreshInterval).
+			Version("4.121.0").
 			Description("How often to re-read `tls.root_cas_file` and the `cert_file` and `key_file` paths under `tls.client_certs`. The paths do not change; only new contents of those files are picked up, and only by connections opened after the next check. Connections already in the pool stay up until they close on their own. A file that cannot be read or parsed is skipped and the previous material stays in use. Inline PEM values are not re-read. `0s` disables the check. When the interval is positive and `tls.root_cas_file` is set, an IP seed host needs `cluster_name` or a tlsname on the host, because a bare IP is not sent as the TLS server name. Refreshing only client certificates, or setting `tls.skip_cert_verify`, has no such requirement.").
 			Default("0s").
 			Advanced(),
 
 		service.NewStringListField(aoFieldCiphers).
+			Version("4.121.0").
 			Description("TLS 1.2 cipher suites to offer, as IANA names such as `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`. Empty leaves the suites selected by `tls`. Names are matched case-insensitively, and a name Go does not implement is rejected at startup. A suite Go marks insecure is accepted when it is named, so the list can match a server that still requires it, and startup logs a warning for each one. TLS 1.3 suites cannot be named here. They stay offered unless `protocols` is `TLSv1.2`. Naming `ciphers` when `protocols` offers TLS 1.3 only fails startup. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}).
 			Advanced(),
 
 		service.NewStringListField(aoFieldProtocols).
+			Version("4.121.0").
 			Description("TLS versions to offer. `TLSv1.2` does not offer TLS 1.3. `TLSv1.3` does not offer TLS 1.2. Empty, or both names, leaves the versions selected by `tls`: TLS 1.2 and TLS 1.3. Names are matched case-insensitively. `ciphers` fails startup when this list offers TLS 1.3 only. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"TLSv1.2"}).
 			Advanced(),
 
 		service.NewStringListField(aoFieldRevokeCertificates).
+			Version("4.121.0").
 			Description("Certificate serial numbers to reject. A value is a decimal integer, or a hex integer with a `0x` prefix. `openssl x509 -noout -serial` prints hex, so convert that to decimal or add the `0x` prefix. A hex value without the prefix is read as decimal when it contains only digits. A serial is unique only for its issuing CA, and the same number on any other certificate in the verified chain, including a root or intermediate, is also rejected. With `tls.skip_cert_verify`, only certificates the server sends are checked, so a root the server does not send is not seen. An empty list leaves the CA check as the only certificate check. A serial may be larger than a 64-bit integer. Requires `tls.enabled`.").
 			Default([]string{}).
 			Example([]string{"123123", "0x1E0F3"}).
