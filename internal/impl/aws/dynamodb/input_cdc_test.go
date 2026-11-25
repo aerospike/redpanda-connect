@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	streamstypes "github.com/aws/aws-sdk-go-v2/service/dynamodbstreams/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,6 +60,47 @@ func TestConvertTableRecordsToBatch_FailoverKeepsBoundarySecond(t *testing.T) {
 	seq1, _ := batch[1].MetaGet("dynamodb_sequence_number")
 	require.Equal(t, "2", seq0)
 	require.Equal(t, "3", seq1)
+}
+
+// The snapshot start is in the host zone and stream stamps are in UTC. The
+// dedupe must still compare them as points in time.
+func TestConvertTableRecordsToBatchSnapshotDedupe(t *testing.T) {
+	t.Log("Given: the snapshot emitted item-1 and started at 10:00:00.300 UTC on a UTC+1 host")
+	snapshotStart := time.Date(2026, 1, 1, 10, 0, 0, 300_000_000, time.UTC).
+		In(time.FixedZone("UTC+1", 3600))
+	keySchema := []dynamodbtypes.KeySchemaElement{
+		{AttributeName: aws.String("pk"), KeyType: dynamodbtypes.KeyTypeHash},
+	}
+	scanItem := map[string]dynamodbtypes.AttributeValue{
+		"pk": &dynamodbtypes.AttributeValueMemberS{Value: "item-1"},
+	}
+	buffer := newSnapshotSequenceBuffer(100)
+	buffer.RecordSnapshotItem(buildItemKeyString(scanItem, keySchema), snapshotStart)
+
+	t.Log("When: the stream returns item-1 records stamped 09:59:59 and 10:00:30 UTC")
+	streamKeys := map[string]streamstypes.AttributeValue{
+		"pk": &streamstypes.AttributeValueMemberS{Value: "item-1"},
+	}
+	record := func(seq string, stamp time.Time) streamstypes.Record {
+		return streamstypes.Record{Dynamodb: &streamstypes.StreamRecord{
+			Keys:                        streamKeys,
+			ApproximateCreationDateTime: &stamp,
+			SequenceNumber:              aws.String(seq),
+		}}
+	}
+	records := []streamstypes.Record{
+		record("before-start", time.Date(2026, 1, 1, 9, 59, 59, 0, time.UTC)),
+		record("after-start", time.Date(2026, 1, 1, 10, 0, 30, 0, time.UTC)),
+	}
+	batch := convertTableRecordsToBatch(records, "t", "shard-1", buffer, time.Time{}, nil)
+
+	t.Log("Then: only the record stamped after the snapshot start stays in the batch")
+	var kept []string
+	for _, msg := range batch {
+		seq, _ := msg.MetaGet("dynamodb_sequence_number")
+		kept = append(kept, seq)
+	}
+	require.Equal(t, []string{"after-start"}, kept)
 }
 
 func TestShouldSkipFailoverRecord(t *testing.T) {
@@ -615,4 +657,38 @@ func TestBatchSizeValidation(t *testing.T) {
 
 	conf.batchSize = 1000
 	require.NoError(t, validateDynamoDBCDCConfig(conf))
+}
+
+func TestCheckpointRetryConfig(t *testing.T) {
+	spec := dynamoDBCDCInputConfig()
+	env := service.NewEnvironment()
+
+	parsed, err := spec.ParseYAML(`
+tables: [mytable]
+`, env)
+	require.NoError(t, err)
+	cfg, err := dynamoCDCInputConfigFromParsed(parsed)
+	require.NoError(t, err)
+	require.NoError(t, validateDynamoDBCDCConfig(cfg))
+	b := newInputRecordBatcher(cfg, nil, nil, nil)
+	assert.Equal(t, persistRetryInitial, b.retryInitial)
+	assert.Equal(t, persistRetryMax, b.retryMax)
+
+	parsed, err = spec.ParseYAML(`
+tables: [mytable]
+checkpoint_retry_initial_interval: 250ms
+checkpoint_retry_max_interval: 5s
+`, env)
+	require.NoError(t, err)
+	cfg, err = dynamoCDCInputConfigFromParsed(parsed)
+	require.NoError(t, err)
+	require.NoError(t, validateDynamoDBCDCConfig(cfg))
+	b = newInputRecordBatcher(cfg, nil, nil, nil)
+	assert.Equal(t, 250*time.Millisecond, b.retryInitial)
+	assert.Equal(t, 5*time.Second, b.retryMax)
+
+	cfg.checkpointRetryMax = 100 * time.Millisecond
+	err = validateDynamoDBCDCConfig(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "checkpoint_retry_max_interval")
 }

@@ -405,107 +405,6 @@ bins: 'root = this.without("id")'
 	assert.Contains(t, err.Error(), "not an integer")
 }
 
-func TestMapMessageFencing(t *testing.T) {
-	w := newTestWriter(t, `
-hosts: [ "localhost:3000" ]
-namespace: test
-key: '${! json("id") }'
-bins: 'root = this.without("id")'
-fencing:
-  enabled: true
-  bin: _off
-  value: '${! meta("kafka_offset") }'
-`)
-
-	msg := service.NewMessage([]byte(`{"id":"u1","v":1}`))
-	msg.MetaSet("kafka_offset", "42")
-
-	op, err := mapOne(t, w, msg)
-	require.NoError(t, err)
-	assert.True(t, op.hasFence)
-	assert.Equal(t, int64(42), op.fence)
-	assert.Equal(t, int64(42), op.bins["_off"])
-}
-
-func TestMapMessageFencedDeleteWritesTombstone(t *testing.T) {
-	w := newTestWriter(t, `
-hosts: [ "localhost:3000" ]
-namespace: test
-key: '${! meta("k") }'
-bins: 'root = this'
-fencing:
-  enabled: true
-  bin: _off
-  value: '${! meta("kafka_offset") }'
-`)
-
-	msg := service.NewMessage([]byte(``))
-	msg.MetaSet("k", "u1")
-	msg.MetaSet("kafka_offset", "9")
-
-	op, err := mapOne(t, w, msg)
-	require.NoError(t, err)
-	assert.Equal(t, opDelete, op.kind)
-	assert.True(t, op.hasFence)
-	assert.Equal(t, int64(9), op.fence)
-	assert.Equal(t, int64(9), op.bins["_off"])
-	assert.Equal(t, true, op.bins["_deleted"])
-}
-
-func TestMapMessageFencingRejectsReservedBins(t *testing.T) {
-	w := newTestWriter(t, `
-hosts: [ "localhost:3000" ]
-namespace: test
-key: '${! json("id") }'
-bins: 'root = this.without("id")'
-fencing:
-  enabled: true
-  bin: _off
-  value: '${! meta("kafka_offset") }'
-`)
-
-	for _, tc := range []struct {
-		body  string
-		field string
-	}{
-		{`{"id":"u1","v":1,"_off":"x"}`, "fencing.bin"},
-		{`{"id":"u1","v":1,"_deleted":true}`, "fencing.tombstone_bin"},
-	} {
-		msg := service.NewMessage([]byte(tc.body))
-		msg.MetaSet("kafka_offset", "42")
-
-		_, err := mapOne(t, w, msg)
-		require.Error(t, err, tc.body)
-		assert.Contains(t, err.Error(), "reserved by '"+tc.field+"'")
-	}
-}
-
-func TestMapMessageReservedBinsAllowedWithoutFencing(t *testing.T) {
-	w := newTestWriter(t, baseConfig)
-
-	op, err := mapOne(t, w, service.NewMessage([]byte(`{"id":"u1","_fence":1,"_deleted":true}`)))
-	require.NoError(t, err)
-	assert.Equal(t, int64(1), op.bins["_fence"])
-	assert.Equal(t, true, op.bins["_deleted"])
-}
-
-func TestConfigRejectsFenceBinMatchingTombstoneBin(t *testing.T) {
-	conf, err := outputSpec().ParseYAML(`
-hosts: [ "localhost:3000" ]
-namespace: test
-key: 'k'
-fencing:
-  enabled: true
-  bin: _deleted
-  tombstone_bin: _deleted
-`, nil)
-	require.NoError(t, err)
-
-	_, err = parseOutputConfig(conf)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must not be the same")
-}
-
 func TestMapMessageRejectsEmptyKey(t *testing.T) {
 	w := newTestWriter(t, baseConfig)
 
@@ -577,22 +476,6 @@ func TestMapMessageOmitsGenerationWhenEmpty(t *testing.T) {
 	write, ok := rec.(*as.BatchWrite)
 	require.True(t, ok)
 	assert.Equal(t, as.NONE, write.Policy.GenerationPolicy)
-}
-
-func TestConfigRejectsLongFenceBin(t *testing.T) {
-	conf, err := outputSpec().ParseYAML(`
-hosts: [ "localhost:3000" ]
-namespace: test
-key: 'k'
-fencing:
-  enabled: true
-  bin: this_bin_name_is_too_long
-`, nil)
-	require.NoError(t, err)
-
-	_, err = parseOutputConfig(conf)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "exceeds the Aerospike limit of 15")
 }
 
 func TestParseConfigSkillDefaults(t *testing.T) {

@@ -20,6 +20,16 @@ on:
         required: false
         default: ''
         type: string
+      parallel:
+        description: 'Number of packages to test at the same time.'
+        required: false
+        default: '16'
+        type: string
+
+# The runner has 32 vCPUs. With 16 packages at the same time, the test step takes about 7 minutes instead of about 35.
+# 8 packages are not more stable and are slower. A schedule run has no inputs, so it uses the fallback.
+env:
+  PARALLEL: ${{ github.event.inputs.parallel || '16' }}
 
 jobs:
   integration-test:
@@ -30,25 +40,36 @@ jobs:
       CGO_ENABLED: 0
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
 
+      # actions/cache saves only when the job succeeds, and this job fails when a test fails. The last step saves the
+      # build cache also then.
       - name: Install Go
-        uses: actions/setup-go@v6
+        id: setup-go
+        uses: $/.github/actions/setup-go
         with:
-          go-version-file: 'go.mod'
+          cache-name: integration
+          save-build-cache: false
 
       - name: Install Task
-        uses: ./.github/actions/setup-task
+        uses: $/.github/actions/setup-task
 
       # Fetch all modules up front so a Go proxy error fails here, not inside a random test package.
       - name: Download Go modules
         run: go mod download
 
+      # Linux AIO events are shared by all containers on the host, and the default limit is 65536. Redpanda and
+      # MySQL reserve them at startup, so packages that run at the same time use them up, and containers fail
+      # with "io_setup() failed with EAGAIN" or exit early.
+      - name: Raise the AIO limit
+        run: sudo sysctl -w fs.aio-max-nr=1048576
+
       - name: Pull Latest Redpanda Image
         run: task docker:pull-redpanda
 
       - name: Run Integration Tests
-        run: task test:integration -- --output-dir "${{ runner.temp }}/integration"
+        id: integration
+        run: task test:integration -- --output-dir "${{ runner.temp }}/integration" --parallel "${PARALLEL}"
         timeout-minutes: 120
 
       - name: Write Summary
@@ -60,11 +81,22 @@ jobs:
 
       - name: Upload Test Output
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: integration-test-output
           path: ${{ runner.temp }}/integration/
           retention-days: 7
+
+      # Save when the test step ran, also when a test failed. A failure inside the tool before the tests, or a
+      # timeout, can save a partial cache, and it then stays until go.mod changes. Both are rare on main.
+      - name: Save Go build cache
+        if: >-
+          !cancelled() && steps.setup-go.outputs.save == 'true' && steps.setup-go.outputs.build-cache-hit != 'true' &&
+          (steps.integration.outcome == 'success' || steps.integration.outcome == 'failure')
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ${{ steps.setup-go.outputs.gocache }}
+          key: ${{ steps.setup-go.outputs.build-key }}
 
   check-author-access:
     if: github.event_name == 'pull_request' && github.event.action == 'opened'
@@ -84,14 +116,18 @@ jobs:
             echo "allowed=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # A pull request whose title starts with build(deps) runs the full suite in integration-test, so this job skips it.
+  # Its go.mod change would otherwise run the full suite here too.
   integration-test-filter:
     needs: [check-author-access]
     if: >-
       always() && (
-        needs.check-author-access.outputs.allowed == 'true' ||
+        (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'build(deps)') && (
+          needs.check-author-access.outputs.allowed == 'true' ||
+          contains(github.event.pull_request.labels.*.name, 'run-integration-tests')
+        )) ||
         (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/integration ')) ||
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.filter != '') ||
-        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'run-integration-tests'))
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.filter != '')
       )
     # Forks without the ubuntu-latest-32 larger runner set the INTEGRATION_RUNNER repo variable.
     runs-on: ${{ vars.INTEGRATION_RUNNER || 'ubuntu-latest-32' }}
@@ -120,30 +156,30 @@ jobs:
 
       - name: Checkout PR branch
         if: ${{ github.event_name == 'issue_comment' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           ref: refs/pull/${{ github.event.issue.number }}/merge
 
       - name: Checkout code
         if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           fetch-depth: 0
 
       - name: Checkout code
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
 
+      # A filtered run builds only some packages. If it saved the integration key, the full nightly build could not
+      # replace it until go.mod changes.
       - name: Install Go
-        uses: actions/setup-go@v6
+        uses: $/.github/actions/setup-go
         with:
-          go-version-file: 'go.mod'
-          # A PR command (/integration) runs this job on the main branch, but with PR code.
-          # A cache save from that run can poison the main cache. Thus, do not cache for a PR command.
-          cache: ${{ github.event_name != 'issue_comment' }}
+          cache-name: integration
+          save-build-cache: false
 
       - name: Install Task
-        uses: ./.github/actions/setup-task
+        uses: $/.github/actions/setup-task
 
       # Fetch all modules up front so a Go proxy error fails here, not inside a random test package.
       - name: Download Go modules
@@ -155,8 +191,7 @@ jobs:
       # The filter is every package in packages.json whose test binary
       # (go list -test -deps) includes a package this PR changes, so a change
       # to shared code such as internal/license runs the components that use
-      # it. A _test.go or testdata/ change only runs its own package. Over the
-      # package budget, filters is empty and budget_exceeded is true.
+      # it. A _test.go or testdata/ change only runs its own package.
       - name: Detect changed packages
         if: ${{ github.event_name == 'pull_request' }}
         id: detect
@@ -169,54 +204,42 @@ jobs:
             echo "go_mod=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Linux AIO events are shared by all containers on the host, and the default limit is 65536. Redpanda and
+      # MySQL reserve them at startup, so packages that run at the same time use them up, and containers fail
+      # with "io_setup() failed with EAGAIN" or exit early.
+      - name: Raise the AIO limit
+        if: ${{ github.event_name != 'pull_request' || steps.detect.outputs.filters != '' || steps.detect.outputs.go_mod == 'true' }}
+        run: sudo sysctl -w fs.aio-max-nr=1048576
+
       # On a pull request the filter comes from the detect step. An empty
-      # filter means every package in packages.json, which does not fit the
-      # 30-minute budget, so a pull request never runs it:
+      # filter means every package in packages.json:
       # - No package depends on the change and go.mod and go.sum are
       #   unchanged: skip and say so in the summary (workflow, docs and
       #   tooling changes).
-      # - go.mod or go.sum changed, or the change reaches more packages than
-      #   the budget allows: fail and ask for /integration <packages>, so the
-      #   change does not pass without any integration run. The /integration
-      #   run reports on main, not on this PR, so this check stays red; a
-      #   maintainer merges once that run passes.
+      # - go.mod or go.sum changed and no package depends on the other
+      #   changes: run every package, so the change does not pass without any
+      #   integration run. With packages in parallel, the full suite fits the
+      #   30-minute timeout.
       # The run-integration-tests label is not checked: auto-label-integration
       # adds it to every pull request from a write-access author.
       # A comment or a dispatch passes its own filter through unchanged. A bare
       # "/integration " or an empty dispatch filter still means every package.
       - name: Pull Latest Redpanda Image
-        if: ${{ github.event_name != 'pull_request' || steps.detect.outputs.filters != '' }}
+        if: ${{ github.event_name != 'pull_request' || steps.detect.outputs.filters != '' || steps.detect.outputs.go_mod == 'true' }}
         run: task docker:pull-redpanda
 
-      # A pull request that touches nothing under internal/impl/ has no packages to
-      # test; without this guard the empty filter runs every package and the step
-      # times out.
+      # A pull request that no package depends on has no packages to test;
+      # without this guard the empty filter runs every package.
       - name: Run Integration Tests
-        if: ${{ github.event_name != 'pull_request' || steps.detect.outputs.filters != '' }}
+        if: ${{ github.event_name != 'pull_request' || steps.detect.outputs.filters != '' || steps.detect.outputs.go_mod == 'true' }}
         env:
           FILTER: ${{ steps.parse.outputs.filter || steps.detect.outputs.filters || github.event.inputs.filter }}
-        run: task test:integration -- --output-dir "${{ runner.temp }}/integration" ${FILTER}
+        run: task test:integration -- --output-dir "${{ runner.temp }}/integration" --parallel "${PARALLEL}" ${FILTER}
         timeout-minutes: 30
 
       - name: No integration test depends on the change
-        if: ${{ github.event_name == 'pull_request' && steps.detect.outputs.filters == '' && steps.detect.outputs.go_mod != 'true' && steps.detect.outputs.budget_exceeded != 'true' }}
+        if: ${{ github.event_name == 'pull_request' && steps.detect.outputs.filters == '' && steps.detect.outputs.go_mod != 'true' }}
         run: echo "No integration test package depends on the files this pull request changes; the filtered integration run was skipped." >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Require a package filter
-        if: ${{ github.event_name == 'pull_request' && steps.detect.outputs.filters == '' && (steps.detect.outputs.go_mod == 'true' || steps.detect.outputs.budget_exceeded == 'true') }}
-        env:
-          AFFECTED: ${{ steps.detect.outputs.affected }}
-          BUDGET_EXCEEDED: ${{ steps.detect.outputs.budget_exceeded }}
-        run: |
-          if [[ "${BUDGET_EXCEEDED}" == "true" ]]; then
-            REASON="The tests of these packages depend on the files this pull request changes, which is more than this job's 30-minute budget can run: ${AFFECTED}."
-          else
-            REASON="go.mod or go.sum changed and no integration test package depends on the other files this pull request changes, and the full suite does not fit this job's 30-minute budget."
-          fi
-          MSG="${REASON} Comment /integration <packages> on this PR (for example /integration kafka aws) to run the packages this change affects. That run reports on main, not on this PR, so this check stays red; a maintainer can merge once the /integration run passes."
-          echo "::error title=Integration filter required::${MSG}"
-          echo "${MSG}" >> "$GITHUB_STEP_SUMMARY"
-          exit 1
 
       - name: Write Summary
         if: always()
@@ -227,7 +250,7 @@ jobs:
 
       - name: Upload Test Output
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: integration-test-output
           path: ${{ runner.temp }}/integration/
