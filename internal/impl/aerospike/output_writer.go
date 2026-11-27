@@ -46,6 +46,9 @@ func newAerospikeOutput(conf *service.ParsedConfig, mgr *service.Resources) (ser
 	}
 	parsed.client.sizePoolForConcurrency(maxInFlight)
 	parsed.client.warnStartup(mgr.Logger())
+	if parsed.fenceEnabled && parsed.tombstoneTTL == as.TTLDontExpire {
+		mgr.Logger().Infof("Fenced deletes leave tombstones that never expire, so the namespace grows with every deleted key; set '%v.%v' to bound it", aoFieldFencing, aoFieldFencingTombstoneTTL)
+	}
 
 	return &aerospikeWriter{
 		conf:        parsed,

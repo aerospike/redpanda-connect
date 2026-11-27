@@ -273,7 +273,7 @@ A connection failure of the batch is still a failure. So is any mapping error ot
 				Description("Bin written on a fenced delete to mark the record as a tombstone. Readers should treat a record carrying this bin as missing, and `aerospike_lookup` does. Counts toward the 15 character bin name limit. A message whose `bins` mapping produces this bin is rejected.").
 				Default(defaultTombstoneBin),
 			service.NewStringField(aoFieldFencingTombstoneTTL).
-				Description(`Time-to-live for fenced tombstone records. Accepts a duration, or `+"`never`"+`. Defaults to `+"`never`"+` so the fence outlives the data TTL; if the tombstone expires, a stale replay can recreate the record.
+				Description(`Time-to-live for fenced tombstone records. Accepts a duration, or `+"`never`"+`. Defaults to `+"`never`"+` so the fence outlives the data TTL; if the tombstone expires, a stale replay can recreate the record. While a tombstone exists, `+"`create_only`"+` on that key fails with `+"`KEY_EXISTS`"+`, so with `+"`never`"+` it fails permanently.
 
 Note that `+"`never`"+` means fenced deletes accumulate without bound: the records stay small, but Aerospike does not evict records that have no void-time, so a delete-heavy workload grows the namespace monotonically. Set a duration comfortably longer than the longest replay or redelivery window you need to defend against — beyond that point a replay is no longer a realistic risk — and budget the primary index at roughly 64 bytes per record per replica in the meantime.`).
 				Default("never").
@@ -285,7 +285,7 @@ Those discards increment the `+"`aerospike_filtered_out`"+` counter and are logg
 
 When fencing is enabled, deletes do not remove the record: they replace it with the fence plus a
 tombstone bin, so a later replay cannot resurrect stale data. Readers should treat that tombstone
-as not found, and `+"`aerospike_lookup`"+` does. `+"`create_only`"+` after a fenced delete fails because the tombstone still exists. `+"`replace_only`"+` succeeds and removes the tombstone, because the record is still there.
+as not found, and `+"`aerospike_lookup`"+` does. `+"`create_only`"+` after a fenced delete fails because the tombstone still exists. `+"`replace_only`"+` succeeds and removes the tombstone, because the record is still there. `+"`update_only`"+` also succeeds and removes the tombstone, leaving a record with only the bins in that update.
 
 Fencing requires `+"`ttl`"+` to be something other than `+"`keep`"+`, which is its default, so set it explicitly. See `+"`coalesce_batch_keys`"+` for how fenced messages for one key in a batch are combined.`).
 			Version("4.121.0").
